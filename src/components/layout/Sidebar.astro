@@ -53,7 +53,7 @@ const activeChapterKey = navTree.find(
                   class:list={['article-link', { active: article.slug === currentSlug }]}
                   aria-current={article.slug === currentSlug ? 'page' : undefined}
                 >
-                  <span class="article-num">{chapter.chapterNumber !== null ? `${chapter.chapterNumber}.${articleIdx + 1}` : `序.${articleIdx + 1}`}</span>
+                  <span class="article-num">{chapter.chapterNumber !== null ? `${chapter.chapterNumber}.${articleIdx + 1}` : `0.${articleIdx + 1}`}</span>
                   {article.title}
                 </a>
               </li>

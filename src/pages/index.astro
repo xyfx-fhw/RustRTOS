@@ -120,7 +120,7 @@ const totalArticles = navTree.reduce((sum, ch) => sum + 1 + ch.articles.length, 
                     <li class="outline-item article-item">
                       <a href={article.href} class="outline-link">
                         <div class="item-main-row">
-                          <span class="article-num">{chapter.chapterNumber !== null ? `${chapter.chapterNumber}.${articleIdx + 1}` : `序.${articleIdx + 1}`}</span>
+                          <span class="article-num">{chapter.chapterNumber !== null ? `${chapter.chapterNumber}.${articleIdx + 1}` : `0.${articleIdx + 1}`}</span>
                           <span class="item-title">{article.title}</span>
                           {data && (
                             <span class="item-difficulty" style={`color: ${difficultyColor[data.difficulty]}`}>
