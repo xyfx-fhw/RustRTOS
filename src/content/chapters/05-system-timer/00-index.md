@@ -1,5 +1,5 @@
 ---
-title: "系统定时器与 Tick 模块"
+title: "系统定时器"
 description: "将原始定时器中断封装为可复用的 Tick API，为后续模块提供系统时钟基础"
 difficulty: intermediate
 estimatedTime: 40

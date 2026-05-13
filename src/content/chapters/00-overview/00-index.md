@@ -1,11 +1,11 @@
 ---
-title: "项目概述与架构设计"
-description: "介绍本系列目标、微内核架构设计与技术选型"
+title: "前言"
+description: "本教程的初衷、面向人群以及学习路线建议"
 difficulty: beginner
-estimatedTime: 15
-keywords: ["RTOS", "微内核", "Cortex-R52", "QEMU", "架构设计"]
+estimatedTime: 5
+keywords: ["前言", "导读", "Rust", "RTOS"]
 ---
 
-# 项目概述与架构设计
+# 前言
 
 （待编写）
