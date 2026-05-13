@@ -6,35 +6,35 @@
     </linearGradient>
   </defs>
 
-  <!-- MCU Pins (White/Very Light Gray to stand out on dark background) -->
+  <!-- MCU Pins (Evenly distributed, centered at 128, 192, 256, 320, 384) -->
   <g fill="#ffffff" opacity="0.9">
     <!-- Top Pins -->
-    <rect x="110" y="32" width="32" height="48" rx="8" />
-    <rect x="183" y="32" width="32" height="48" rx="8" />
-    <rect x="256" y="32" width="32" height="48" rx="8" transform="translate(-16, 0)"/>
-    <rect x="329" y="32" width="32" height="48" rx="8" />
-    <rect x="370" y="32" width="32" height="48" rx="8" />
+    <rect x="112" y="32" width="32" height="48" rx="8" />
+    <rect x="176" y="32" width="32" height="48" rx="8" />
+    <rect x="240" y="32" width="32" height="48" rx="8" />
+    <rect x="304" y="32" width="32" height="48" rx="8" />
+    <rect x="368" y="32" width="32" height="48" rx="8" />
     
     <!-- Bottom Pins -->
-    <rect x="110" y="432" width="32" height="48" rx="8" />
-    <rect x="183" y="432" width="32" height="48" rx="8" />
-    <rect x="256" y="432" width="32" height="48" rx="8" transform="translate(-16, 0)"/>
-    <rect x="329" y="432" width="32" height="48" rx="8" />
-    <rect x="370" y="432" width="32" height="48" rx="8" />
+    <rect x="112" y="432" width="32" height="48" rx="8" />
+    <rect x="176" y="432" width="32" height="48" rx="8" />
+    <rect x="240" y="432" width="32" height="48" rx="8" />
+    <rect x="304" y="432" width="32" height="48" rx="8" />
+    <rect x="368" y="432" width="32" height="48" rx="8" />
     
     <!-- Left Pins -->
-    <rect x="32" y="110" width="48" height="32" rx="8" />
-    <rect x="32" y="183" width="48" height="32" rx="8" />
-    <rect x="32" y="256" width="48" height="32" rx="8" transform="translate(0, -16)"/>
-    <rect x="32" y="329" width="48" height="32" rx="8" />
-    <rect x="32" y="370" width="48" height="32" rx="8" />
+    <rect x="32" y="112" width="48" height="32" rx="8" />
+    <rect x="32" y="176" width="48" height="32" rx="8" />
+    <rect x="32" y="240" width="48" height="32" rx="8" />
+    <rect x="32" y="304" width="48" height="32" rx="8" />
+    <rect x="32" y="368" width="48" height="32" rx="8" />
     
     <!-- Right Pins -->
-    <rect x="432" y="110" width="48" height="32" rx="8" />
-    <rect x="432" y="183" width="48" height="32" rx="8" />
-    <rect x="432" y="256" width="48" height="32" rx="8" transform="translate(0, -16)"/>
-    <rect x="432" y="329" width="48" height="32" rx="8" />
-    <rect x="432" y="370" width="48" height="32" rx="8" />
+    <rect x="432" y="112" width="48" height="32" rx="8" />
+    <rect x="432" y="176" width="48" height="32" rx="8" />
+    <rect x="432" y="240" width="48" height="32" rx="8" />
+    <rect x="432" y="304" width="48" height="32" rx="8" />
+    <rect x="432" y="368" width="48" height="32" rx="8" />
   </g>
 
   <!-- MCU Body (Orange) -->
