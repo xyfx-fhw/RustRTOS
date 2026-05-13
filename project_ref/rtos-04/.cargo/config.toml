@@ -1,0 +1,9 @@
+[build]
+target = "armv8r-none-eabihf"
+
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.armv8r-none-eabihf]
+rustflags = ["-C", "link-arg=-Tlink.x"]
