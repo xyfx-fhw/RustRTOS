@@ -4,7 +4,7 @@ import remarkBoldClass from './src/plugins/remark-bold-class.mjs';
 
 export default defineConfig({
   site: 'https://xyfx-fhw.github.io',
-  base: '/RustCourse',
+  base: '/RustRTOS',
   markdown: {
     remarkPlugins: [remarkRustCodeblock, remarkBoldClass],
   },

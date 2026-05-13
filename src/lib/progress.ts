@@ -13,7 +13,7 @@ interface ProgressStore {
   certificate: { name: string; earnedAt: string } | null;
 }
 
-const STORAGE_KEY = 'rust-tutorial-progress';
+const STORAGE_KEY = 'rust-rtos-progress';
 
 function load(): ProgressStore {
   try {
