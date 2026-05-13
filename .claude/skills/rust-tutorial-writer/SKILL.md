@@ -326,5 +326,5 @@ keywords: ["关键词1", "关键词2", "关键词3"]
 ## 文件存放位置
 
 - 文章：用户在第零步确认的路径
-- 图片：`public/diagrams/` 目录，引用路径 `/RustCourse/diagrams/文件名.svg`
+- 图片：`public/diagrams/` 目录，引用路径 `/RustRTOS/diagrams/文件名.svg`
 - 命名约定：`00-` 开头为章节首页，其余按字母序排列决定顺序
