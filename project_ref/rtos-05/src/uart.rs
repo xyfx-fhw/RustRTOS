@@ -8,13 +8,13 @@ const UART0_CTRL:  *mut   u32 = (UART0_BASE + 0x08) as *mut   u32;
 
 pub fn uart_init() {
     unsafe {
-        UART0_CTRL.write_volatile(0x1);
+        UART0_CTRL.write_volatile(0b01);
     }
 }
 
 pub fn uart_putc(byte: u8) {
     unsafe {
-        while (UART0_STATE.read_volatile() & 0x2) != 0 {}
+        while (UART0_STATE.read_volatile() & 0b10) != 0 {}
         UART0_DATA.write_volatile(byte as u32);
     }
 }

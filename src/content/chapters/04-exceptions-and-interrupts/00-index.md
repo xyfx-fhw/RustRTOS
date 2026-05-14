@@ -121,30 +121,30 @@ SECTIONS
 在 `global_asm!` 中用两个独立段实现：
 
 ```rust
-global_asm!(
+global_asm!(r#"
     // ── 向量表：8 条 B 指令，必须在 0x00000000 ──
-    ".section .text.vector_table, \"ax\"",
-    ".global _vectors",
-    "_vectors:",
-    "b reset_body",       // 0x00  Reset
-    "b undef_handler",    // 0x04  Undefined Instruction
-    "b svc_handler",      // 0x08  SVC
-    "b prefetch_handler", // 0x0C  Prefetch Abort
-    "b data_handler",     // 0x10  Data Abort
-    "b hang",             // 0x14  HVC（暂不用）
-    "b irq_handler",      // 0x18  IRQ  ← 下一章实现
-    "b fiq_handler",      // 0x1C  FIQ
+    .section .text.vector_table, "ax"
+    .global _vectors
+    _vectors:
+    b reset_body",       // 0x00  Reset
+    b undef_handler",    // 0x04  Undefined Instruction
+    b svc_handler",      // 0x08  SVC
+    b prefetch_handler", // 0x0C  Prefetch Abort
+    b data_handler",     // 0x10  Data Abort
+    b hang",             // 0x14  HVC（暂不用）
+    b irq_handler",      // 0x18  IRQ  ← 下一章实现
+    b fiq_handler",      // 0x1C  FIQ
 
     // ── 异常处理桩：尚未实现的异常全部挂起 CPU ──
-    ".section .text.handlers, \"ax\"",
-    "undef_handler:",     "b undef_handler",
-    "svc_handler:",       "b svc_handler",
-    "prefetch_handler:",  "b prefetch_handler",
-    "data_handler:",      "b data_handler",
-    "hang:",              "wfi", "b hang",
-    "irq_handler:",       "b irq_handler",      // 下一章替换
-    "fiq_handler:",       "b fiq_handler",
-);
+    .section .text.handlers, "ax"
+    undef_handler:",     "b undef_handler
+    svc_handler:",       "b svc_handler
+    prefetch_handler:",  "b prefetch_handler
+    data_handler:",      "b data_handler
+    hang:",              "wfi", "b hang
+    irq_handler:",       "b irq_handler",      // 下一章替换
+    fiq_handler:",       "b fiq_handler
+"#);
 ```
 
 每个"处理桩"都是 `b <self>`（跳回自身的死循环）加上可选的 `wfi`（让 CPU 进入低功耗等待）。这比让 CPU 乱跑要安全得多——出了异常至少知道 CPU 卡在哪里。
@@ -156,16 +156,16 @@ global_asm!(
 向量表占据了 `0x00000000`，实际的初始化代码标号从 `reset_handler` 改为 `reset_body`（含义更准确）：
 
 ```rust
-global_asm!(
-    ".section .text.reset_handler, \"ax\"",
-    ".global reset_body",
-    "reset_body:",           // ← 之前是 reset_handler
+global_asm!(r#"
+    .section .text.reset_handler, "ax"
+    .global reset_body
+    reset_body:",           // ← 之前是 reset_handler
 
-    "ldr sp, =_stack_start",
+    ldr sp, =_stack_start
     // ... 清零 BSS、复制 .data ...
-    "bl rust_main",
-    "5:", "wfi", "b 5b",
-);
+    bl rust_main
+    5:", "wfi", "b 5b
+"#);
 ```
 
 ## 步骤四：完整的 src/main.rs
@@ -179,51 +179,51 @@ mod uart;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 
-global_asm!(
+global_asm!(r#"
     // 向量表
-    ".section .text.vector_table, \"ax\"",
-    ".global _vectors",
-    "_vectors:",
-    "b reset_body",
-    "b undef_handler",
-    "b svc_handler",
-    "b prefetch_handler",
-    "b data_handler",
-    "b hang",
-    "b irq_handler",
-    "b fiq_handler",
+    .section .text.vector_table, "ax"
+    .global _vectors
+    _vectors:
+    b reset_body
+    b undef_handler
+    b svc_handler
+    b prefetch_handler
+    b data_handler
+    b hang
+    b irq_handler
+    b fiq_handler
 
     // 异常处理桩
-    ".section .text.handlers, \"ax\"",
-    "undef_handler:",     "b undef_handler",
-    "svc_handler:",       "b svc_handler",
-    "prefetch_handler:",  "b prefetch_handler",
-    "data_handler:",      "b data_handler",
-    "hang:",              "wfi", "b hang",
-    "irq_handler:",       "b irq_handler",
-    "fiq_handler:",       "b fiq_handler",
+    .section .text.handlers, "ax"
+    undef_handler:",     "b undef_handler
+    svc_handler:",       "b svc_handler
+    prefetch_handler:",  "b prefetch_handler
+    data_handler:",      "b data_handler
+    hang:",              "wfi", "b hang
+    irq_handler:",       "b irq_handler
+    fiq_handler:",       "b fiq_handler
 
     // Reset handler（初始化代码）
-    ".section .text.reset_handler, \"ax\"",
-    ".global reset_body",
-    "reset_body:",
-    "ldr sp, =_stack_start",
-    "ldr r0, =_sbss",
-    "ldr r1, =_ebss",
-    "mov r2, #0",
-    "1:", "cmp r0, r1", "bhs 2f",
-    "str r2, [r0]", "add r0, r0, #4", "b 1b",
-    "2:",
-    "ldr r0, =_sdata",
-    "ldr r1, =_edata",
-    "ldr r2, =_sidata",
-    "3:", "cmp r0, r1", "bhs 4f",
-    "ldr r3, [r2]", "str r3, [r0]",
-    "add r0, r0, #4", "add r2, r2, #4", "b 3b",
-    "4:",
-    "bl rust_main",
-    "5:", "wfi", "b 5b",
-);
+    .section .text.reset_handler, "ax"
+    .global reset_body
+    reset_body:
+    ldr sp, =_stack_start
+    ldr r0, =_sbss
+    ldr r1, =_ebss
+    mov r2, #0
+    1:", "cmp r0, r1", "bhs 2f
+    str r2, [r0]", "add r0, r0, #4", "b 1b
+    2:
+    ldr r0, =_sdata
+    ldr r1, =_edata
+    ldr r2, =_sidata
+    3:", "cmp r0, r1", "bhs 4f
+    ldr r3, [r2]", "str r3, [r0]
+    add r0, r0, #4", "add r2, r2, #4", "b 3b
+    4:
+    bl rust_main
+    5:", "wfi", "b 5b
+"#);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {

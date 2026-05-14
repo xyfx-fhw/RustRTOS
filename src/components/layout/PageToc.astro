@@ -60,6 +60,19 @@ const tocHeadings = headings.filter(h => h.depth >= 1 && h.depth <= 3);
 
     headingEls.forEach(el => el && observer.observe(el));
 
+    // tab 切换时，主动激活新 tab 第一个标题（Observer 的窄观察带不可靠）
+    window.addEventListener('sp-tab-changed', (e: Event) => {
+      const tabIdx = (e as CustomEvent<{ tabIdx: number }>).detail.tabIdx;
+      const panel = document.querySelector<HTMLElement>(`.tab-panel[data-tab-idx="${tabIdx}"]`);
+      if (!panel) return;
+      for (let i = 0; i < headingEls.length; i++) {
+        if (headingEls[i] && panel.contains(headingEls[i]!)) {
+          activate(i);
+          break;
+        }
+      }
+    });
+
     // 拦截 TOC 链接点击，处理跨标签跳转
     // 不阻止默认行为，让浏览器在 tab 切换后自动滚动到锚点
     links.forEach(link => {

@@ -12,9 +12,9 @@ keywords: ["cargo new", "Cargo.toml", "config.toml", "build-std", "opt-level", "
 - 配置 `.cargo/config.toml`：指定编译目标和 build-std
 - 配置 `Cargo.toml`：设置 opt-level 让 binary 适应 32KB Flash
 
-# 前置知识
+## 前置知识
 
-## 已完成的章节
+### 已完成的章节
 
 `01-environment-setup/00-index.md` 已完成，nightly 工具链和 QEMU 均已安装。
 
@@ -31,8 +31,10 @@ cd rtos
 
 ```text
 rtos/
+├── .git/          ← cargo 默认初始化的 git 仓库，非重点可忽略（也可能不显示）
 ├── src/
-│   └── main.rs    ← 先忽略，后面章节会完整替换
+│   └── main.rs    ← 会初始化 hello world 的简单代码，后面章节会完整替换
+├── .gitignore     ← 非重点可忽略
 └── Cargo.toml
 ```
 
@@ -40,7 +42,7 @@ rtos/
 
 # 步骤二：配置 .cargo/config.toml
 
-在项目根目录新建 `.cargo/config.toml`（注意是隐藏目录 `.cargo`）：
+在项目根目录（注意rtos这个目录为根目录）新建 `.cargo/config.toml`（注意是隐藏目录 `.cargo`）：
 
 ```bash
 mkdir .cargo
@@ -64,10 +66,13 @@ rustflags = ["-C", "link-arg=-Tlink.x"]
 
 | 配置项 | 作用 |
 | --- | --- |
-| `target` | 默认编译到 Cortex-R52（AArch32），不用每次手写 `--target` |
-| `build-std = ["core"]` | Tier 3 无预编译库，每次构建时从源码编译 `core` |
+| `target` | 默认编译到 Cortex-R52（AArch32），后续编译不用每次都手写 `--target` |
+| `build-std = ["core"]` | Tier 3 无预编译库，每次构建时从源码编译 `core` （也就是上一篇文章讲到的rust-src源码） |
 | `build-std-features = ["compiler-builtins-mem"]` | 编译内置的 `memcpy`/`memset` 等内存操作函数 |
-| `rustflags = ["-Tlink.x"]` | 告诉链接器使用 `link.x` 脚本（下一章会创建） |
+| `rustflags = ["-Tlink.x"]` | 告诉链接器使用 `link.x` 脚本（后续文章会创建和讲解） |
+
+> **为什么要配置 `compiler-builtins-mem`？**
+> 在普通的操作系统环境中，底层提供了包含 `memcpy`（内存拷贝）和 `memset`（内存初始化）等函数的 C 标准库（libc）。但在裸机环境下并没有 libc。当编译器底层（LLVM）自动优化并生成对这些函数的调用时，链接器会因为找不到它们而报错。开启 `compiler-builtins-mem` 特性后，Rust 会在使用 `-Z build-std` 时自动引入用纯 Rust 实现的这些内存操作函数，从而避免链接错误。
 
 添加后目录结构：
 
@@ -124,7 +129,7 @@ rtos/
 └── Cargo.toml        ← 已追加 profile 配置
 ```
 
-这就是后续所有章节的起点。下一篇文章会在这个目录里新建 `link.x` 链接脚本。
+这就是后续所有章节的起点。
 
 # 验证方法
 

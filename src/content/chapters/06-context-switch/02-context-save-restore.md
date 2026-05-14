@@ -88,29 +88,29 @@ ARM 的 `PUSH {r0-r12, lr}` 遵循一条固定规则：**低编号寄存器存�
 ```rust
 use core::arch::global_asm;
 
-global_asm!(
+global_asm!(r#"
     // context_switch(curr: *mut Task, next: *const Task)
     // r0 = curr（指向当前任务 TCB 的指针）
     // r1 = next（指向下一任务 TCB 的指针）
-    ".global context_switch",
-    ".type   context_switch, %function",
-    "context_switch:",
-    "push {{r0-r12, lr}}",   // ① 保存当前任务的寄存器到其私有栈
-    "str  sp, [r0]",         // ② curr->stack_ptr = sp（更新 TCB）
-    "ldr  sp, [r1]",         // ③ sp = next->stack_ptr（切换到下一任务的栈）
-    "pop  {{r0-r12, lr}}",   // ④ 恢复下一任务的寄存器
-    "bx   lr",               // ⑤ 跳到下一任务的返回地址（或入口函数）
+    .global context_switch
+    .type   context_switch, %function
+    context_switch:
+    push {{r0-r12, lr}}",   // ① 保存当前任务的寄存器到其私有栈
+    str  sp, [r0]",         // ② curr->stack_ptr = sp（更新 TCB）
+    ldr  sp, [r1]",         // ③ sp = next->stack_ptr（切换到下一任务的栈）
+    pop  {{r0-r12, lr}}",   // ④ 恢复下一任务的寄存器
+    bx   lr",               // ⑤ 跳到下一任务的返回地址（或入口函数）
 
     // start_first_task(task: *const Task)
     // r0 = task（指向要启动的任务 TCB）
     // 注意：此函数永不返回
-    ".global start_first_task",
-    ".type   start_first_task, %function",
-    "start_first_task:",
-    "ldr  sp, [r0]",         // sp = task->stack_ptr（加载初始栈帧地址）
-    "pop  {{r0-r12, lr}}",   // 从初始帧恢复所有寄存器（lr = 入口函数地址）
-    "bx   lr",               // 跳到入口函数，第一个任务开始运行
-);
+    .global start_first_task
+    .type   start_first_task, %function
+    start_first_task:
+    ldr  sp, [r0]",         // sp = task->stack_ptr（加载初始栈帧地址）
+    pop  {{r0-r12, lr}}",   // 从初始帧恢复所有寄存器（lr = 入口函数地址）
+    bx   lr",               // 跳到入口函数，第一个任务开始运行
+"#);
 ```
 
 然后在同一文件中声明这两个函数的 Rust 签名：
@@ -239,23 +239,23 @@ pub fn create_task(entry: fn() -> !) -> Task {
     }
 }
 
-global_asm!(
-    ".global context_switch",
-    ".type   context_switch, %function",
-    "context_switch:",
-    "push {{r0-r12, lr}}",
-    "str  sp, [r0]",
-    "ldr  sp, [r1]",
-    "pop  {{r0-r12, lr}}",
-    "bx   lr",
+global_asm!(r#"
+    .global context_switch
+    .type   context_switch, %function
+    context_switch:
+    push {{r0-r12, lr}}
+    str  sp, [r0]
+    ldr  sp, [r1]
+    pop  {{r0-r12, lr}}
+    bx   lr
 
-    ".global start_first_task",
-    ".type   start_first_task, %function",
-    "start_first_task:",
-    "ldr  sp, [r0]",
-    "pop  {{r0-r12, lr}}",
-    "bx   lr",
-);
+    .global start_first_task
+    .type   start_first_task, %function
+    start_first_task:
+    ldr  sp, [r0]
+    pop  {{r0-r12, lr}}
+    bx   lr
+"#);
 
 unsafe extern "C" {
     pub fn context_switch(curr: *mut Task, next: *const Task);

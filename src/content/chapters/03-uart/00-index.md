@@ -44,7 +44,26 @@ UART0 的基址是 `0xe7c00000`（CPU0 专用 UART，连接到 QEMU 的第一个
 | `+0x04` | STATE | 状态寄存器。bit 1 = 发送缓冲区满（1 表示满，需等待） |
 | `+0x08` | CTRL | 控制寄存器。bit 0 = 发送使能（写 1 开启发送） |
 
-> **提示：** QEMU 模拟的 UART 通常不需要配置波特率，速率由模拟器控制。但 CTRL 寄存器的发送使能位仍然需要置 1，否则向 DATA 写入的字节不会被发送。
+> **💡 硬件寄存器小科普：它是如何工作的？**
+>
+> 初次接触硬件寄存器，大家经常会有几个疑问：
+>
+> - **CTRL 开关是一次性的吗？**
+>   控制寄存器（CTRL）就像机器的**“总电源开关”**。你只要开启了“发送使能”（写 `1`），它就一直保持通电状态，不会自动清零。除非你手动写 `0` 关掉它。所以我们只需要在内核启动时调一次初始化，以后就不需要再管它了。
+>
+> - **开启后会一直发相同的数据吗？**
+>   不会的！数据寄存器（DATA）的工作方式像是一台**“饮水机”**的入口。当你往 `DATA` 里塞入一个新字符，就像放了一个杯子；机器一旦扫描到有字符进来，就会将其顺着线路上推发出去。发完之后内部缓冲区就空了，必须等你再写下一次（Write 操作），才会发送下一个。
+>
+> - **STATE 是只读的吗？为什么需要按位操作？**
+>   是的，状态寄存器通常是**只读的（Read-Only）**，它是机器对外展示的信号灯，比如“发送缓冲区满了”。此外，每个寄存器本身是 **32 位** 宽的，能承载 32 个独立的开关或信号灯。比如 `CTRL` 的 bit 1 可能是“接收使能”，bit 2 可能是“中断开启”，但现在我们只发不收，所以只要点亮 `bit 0` 这一盏灯即可；同理，检查状态时也只用位运算（`& 0b10`）来偷瞄第 1 位。
+
+## UART 标准使用流程
+
+了解了寄存器的运作方式，我们就能总结出通过串口发数据的三大核心步骤（这不仅适用于我们这款芯片，对于大部分简单串口驱动都是通用的）：
+
+1. **初始化（Init）**：这部分只要做一次。写入 `CTRL` 把“总电源”打开，也就是令 bit 0 为 1。
+2. **检查状态（Check State）**：由于 CPU 的速度远比串口外设发信号的速度快得多，在每次发数据前，必须要盯住 `STATE` 寄存器。如果发现发送缓冲区是满的（bit 1 为 1），就要原地死循环等待，也就是俗称的**“轮询（Polling）”**。
+3. **写入数据（Write Data）**：一旦发现缓冲区有空位了（bit 1 变为 0），立刻把准备发送的一个字符装入 `DATA` 寄存器。硬件会自动接手剩下的发送工作。
 
 # 发送单个字符
 
@@ -60,7 +79,12 @@ const UART0_STATE: *const u32 = (UART0_BASE + 0x04) as *const u32;
 const UART0_CTRL:  *mut   u32 = (UART0_BASE + 0x08) as *mut   u32;
 ```
 
-这里用 `*mut u32` 和 `*const u32` 区分"可写寄存器"和"只读寄存器"，虽然不是硬性要求，但能帮助读者理解哪些寄存器只能读、哪些可以写。
+> **语法小提示：为什么用 `const UART0_BASE`？**
+> `const` 在 Rust 中定义的是**编译期常量**。它非常适合用来定义硬件内存地址这种“雷打不动”的值：
+> 1. 不同于普通的 `let` 变量，`const` 常量不仅不会变化，而且**连内存占用都没有**。
+> 2. 编译器会在编译（汇编）的时候，像查找替换一样，将你代码中出现 `UART0_DATA` 的地方直接替换成最底层的物理常数 `0xe7c00000`。可以说使用 `const` 是给硬件寻址贴上了一个零开销的“人类可读标签”。
+
+代码里除了基地址，还有 `*mut u32` 和 `*const u32` 的语法，这用来区分“可写寄存器”和“只读寄存器”。虽然硬件地址本身只是长整数，但通过转换成对应权限的裸指针，能帮助读者（甚至编译器）理解哪些寄存器能改、哪些只能看。
 
 > **注意：** 裸指针操作必须放在 `unsafe` 块里。这是 Rust 提醒你：你在绕过内存安全检查，直接操作硬件地址，后果自负。
 
@@ -69,17 +93,20 @@ const UART0_CTRL:  *mut   u32 = (UART0_BASE + 0x08) as *mut   u32;
 ```rust
 /// 初始化 UART：开启发送使能
 pub fn uart_init() {
+    // 读写裸指针（直接操作物理内存）属于可能破坏内存安全的行为，
+    // 必须要用 unsafe 块显式接管安全责任
     unsafe {
         // CTRL bit 0 = TX enable（发送使能）
-        UART0_CTRL.write_volatile(0x1);
+        UART0_CTRL.write_volatile(0b01);
     }
 }
 
 /// 发送单个字节
 pub fn uart_putc(byte: u8) {
+    // 同理，读取状态和写入数据寄存器都需要 unsafe 块
     unsafe {
         // 等待发送缓冲区不满（STATE bit 1 = TXBF，1 表示满）
-        while (UART0_STATE.read_volatile() & 0x2) != 0 {}
+        while (UART0_STATE.read_volatile() & 0b10) != 0 {}
         // 写入数据寄存器，UART 开始发送
         UART0_DATA.write_volatile(byte as u32);
     }
@@ -87,6 +114,12 @@ pub fn uart_putc(byte: u8) {
 ```
 
 `write_volatile` 和 `read_volatile` 是 Rust 的"不可优化读写"，告诉编译器不要把这些操作优化掉——对于硬件寄存器，每次读写都有意义，不能被跳过或重排。如果用普通的指针赋值，编译器可能会认为"这段内存没被读过，写了也没用"，直接把整个操作删掉。
+
+> **💡 进阶思考：这里的 while 循环会导致死机吗？**
+> `while (UART0_STATE.read_volatile() & 0b10) != 0 {}` 这种写法叫**“忙等待（Busy-waiting）”**。只要外设没准备好，CPU 就会一直死等。
+> - 在目前的 **QEMU 模拟环境**里，它非常安全，因为模拟外设几乎瞬间就能发完数据，不会真正卡住。
+> - 但在**真正的物理硬件**上，如果串口芯片损坏、时钟没配好，或者因为线缆故障触发了流控阻塞，这个循环就有可能变成永远出不来的**死循环**，导致整个操作系统瘫痪（Hang）。
+> - **真实的工业级代码会怎么处理？** 通常会加入**超时机制（Timeout）**（比如循环 10 万次还没发完就返回错误），或者改用后面会讲到的**中断（Interrupt）**甚至 **DMA 技术**，让硬件在后台悄悄发送，解放 CPU。因为我们目前还在系统刚上电、什么设施都没建好的“洪荒时代”（俗称 Early UART 阶段），这种极简粗暴的“死等”策略其实恰好是最实用和最可靠的！
 
 ## 步骤三：发送字符串
 
@@ -165,13 +198,13 @@ const UART0_CTRL:  *mut   u32 = (UART0_BASE + 0x08) as *mut   u32;
 
 pub fn uart_init() {
     unsafe {
-        UART0_CTRL.write_volatile(0x1);
+        UART0_CTRL.write_volatile(0b01);
     }
 }
 
 pub fn uart_putc(byte: u8) {
     unsafe {
-        while (UART0_STATE.read_volatile() & 0x2) != 0 {}
+        while (UART0_STATE.read_volatile() & 0b10) != 0 {}
         UART0_DATA.write_volatile(byte as u32);
     }
 }
@@ -222,39 +255,39 @@ mod uart;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 
-global_asm!(
-    ".section .text.reset_handler, \"ax\"",
-    ".global reset_handler",
-    ".type reset_handler, %function",
-    "reset_handler:",
-    "ldr sp, =_stack_start",
-    "ldr r0, =_sbss",
-    "ldr r1, =_ebss",
-    "mov r2, #0",
-    "1:",
-    "cmp r0, r1",
-    "bhs 2f",
-    "str r2, [r0]",
-    "add r0, r0, #4",
-    "b 1b",
-    "2:",
-    "ldr r0, =_sdata",
-    "ldr r1, =_edata",
-    "ldr r2, =_sidata",
-    "3:",
-    "cmp r0, r1",
-    "bhs 4f",
-    "ldr r3, [r2]",
-    "str r3, [r0]",
-    "add r0, r0, #4",
-    "add r2, r2, #4",
-    "b 3b",
-    "4:",
-    "bl rust_main",
-    "5:",
-    "wfi",
-    "b 5b",
-);
+global_asm!(r#"
+    .section .text.reset_handler, "ax"
+    .global reset_handler
+    .type reset_handler, %function
+    reset_handler:
+    ldr sp, =_stack_start
+    ldr r0, =_sbss
+    ldr r1, =_ebss
+    mov r2, #0
+    1:
+    cmp r0, r1
+    bhs 2f
+    str r2, [r0]
+    add r0, r0, #4
+    b 1b
+    2:
+    ldr r0, =_sdata
+    ldr r1, =_edata
+    ldr r2, =_sidata
+    3:
+    cmp r0, r1
+    bhs 4f
+    ldr r3, [r2]
+    str r3, [r0]
+    add r0, r0, #4
+    add r2, r2, #4
+    b 3b
+    4:
+    bl rust_main
+    5:
+    wfi
+    b 5b
+"#);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {
@@ -310,7 +343,7 @@ E: 编译器的优化器会分析数据流，发现"写入了一个值但没有�
 ```
 
 ```quiz single
-Q: uart_putc 函数里 while (STATE.read_volatile() & 0x2) != 0 {} 这个循环的目的是什么？
+Q: uart_putc 函数里 while (STATE.read_volatile() & 0b10) != 0 {} 这个循环的目的是什么？
 - 等待接收缓冲区有新数据
 + 等待发送缓冲区空出来，防止新字节在上一个字节还没发完时覆盖掉它
 - 检测 UART 是否初始化完成
@@ -321,8 +354,8 @@ E: CMSDK APB UART 的 STATE 寄存器 bit 1（TXBF）为 1 时表示发送缓冲
 ```quiz single
 Q: 为什么实现 print! 宏要先实现 core::fmt::Write trait，而不是直接调用 uart_putc？
 - 因为 uart_putc 太慢，Write trait 会自动缓冲数据
-+ 因为 core::fmt 的格式化系统（如 {} 占位符）需要一个实现了 Write 的类型来接收格式化后的字符串，通过 trait 可以复用整个格式化基础设施
 - 因为 Write trait 会自动处理 UTF-8 编码
 - 因为直接调用 uart_putc 无法在 no_std 环境使用
++ 因为 core::fmt 的格式化系统（如 {} 占位符）需要一个实现了 Write 的类型来接收格式化后的字符串，通过 trait 可以复用整个格式化基础设施
 E: core::fmt::write() 函数接受一个 &mut dyn Write 参数，负责把格式字符串和参数组合成最终字符串，每拼出一段就调用 write_str 输出。我们只要实现 write_str（转调 uart_puts），就能借用整个格式化系统，自动支持 {}、{:x}、{:#?} 等所有格式符号。
 ```

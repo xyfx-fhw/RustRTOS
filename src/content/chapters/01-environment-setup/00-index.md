@@ -48,7 +48,7 @@ source "$HOME/.cargo/env"
 
 ## 步骤二：安装 nightly 工具链
 
-先解释一个概念：**交叉编译**。
+### 先解释一个概念：**交叉编译**
 
 我们写代码的电脑是 x86_64 架构，但程序最终要跑在 Cortex-R52（ARM 架构）上。这就像你在中文环境写了一份文件，但要交给只懂英文的读者——你需要一个翻译。Rust 编译器就是这个翻译，通过指定**编译目标（target）**，告诉它把代码翻译成哪种架构的机器指令。本项目使用的 target 是：
 
@@ -67,7 +67,13 @@ armv8r-none-eabihf
 
 Cortex-R52 正是 ARMv8-R 架构，所以这个 target 与之精确匹配。
 
----
+为了加深理解，这里列举几个其他典型的 target 名称：
+- `x86_64-unknown-linux-gnu`：普通的 64 位 Linux 系统（比如常见的云服务器）
+- `x86_64-pc-windows-msvc`：常见的 64 位 Windows 系统
+- `aarch64-apple-darwin`：Apple Silicon（M1/M2 等）芯片的 macOS 系统
+- `thumbv7m-none-eabi`：常见的 ARM Cortex-M3 芯片裸机环境（如某些 STM32 开发板）
+
+### 为什么要用 nightly
 
 现在说说为什么需要 **nightly**，先解释 nightly 是什么。
 
@@ -80,7 +86,7 @@ nightly 就是 Rust 的一个版本，和 Python 3.11、3.12 是一个意思。�
 
 我们需要 nightly 的逻辑链如下：
 
-Rust 编译任何程序都需要一份**标准库**（`core`、`alloc` 等），这份库也必须是为目标架构编译的版本，不能用 x86_64 版本。对于常见平台，Rust 官方会预先编译好这份库，用户直接下载就能用。但 Rust 把平台支持分成了三级：
+首先，Rust 编译任何程序都需要依赖一份**标准库**（包含了 `Option`、`Result` 等基础类型定义的 `core`，以及提供各种数据结构和动态内存分配的 `alloc` 等）。它就像盖房需要的水泥和砖块，是编写 Rust 代码的基础设施。这份库也必须是为目标架构编译好的版本，不能用你电脑原生的 x86_64 版本。对于常见平台，Rust 官方会预先编译好这份库，用户直接下载就能用。但 Rust 把平台支持分成了三级：
 
 - **Tier 1 / Tier 2**：Rust 官方提供预编译好的标准库，可以直接下载使用
 - **Tier 3**：官方承认这个平台，但**不提供预编译库**，需要用户自己从源码编译
@@ -92,6 +98,10 @@ Rust 为此提供了一个专门的编译选项 `-Z build-std`，加上它之后
 所以结论是：Tier 3 target → 没有预编译库 → 需要 `-Z build-std` → 只能用 nightly。
 
 > **注意：** Tier 3 不代表不好用。`-Z build-std` 在嵌入式社区已经相当成熟，只是 Rust 官方还在走稳定化流程。后续章节会通过 `.cargo/config.toml` 把它配置好，届时每次 `cargo build` 都会自动处理，你感受不到任何差异。
+
+### 安装 nightly
+
+解释了这么多，安装 nightly 就使用下面这条指令即可
 
 ```bash
 rustup toolchain install nightly
@@ -167,7 +177,7 @@ qemu-system-arm: -machine mps3-an536: unsupported machine type
 brew install qemu
 ```
 
-Homebrew 会自动安装当前最新稳定版，通常是 8.x 或 9.x，满足要求。
+Homebrew 会自动安装当前最新稳定版，通常是大于 8.0 版本的，满足要求。
 
 ## Linux（Ubuntu / Debian）
 

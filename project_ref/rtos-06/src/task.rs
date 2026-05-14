@@ -26,23 +26,23 @@ pub fn create_task(entry: fn() -> !) -> Task {
     }
 }
 
-global_asm!(
-    ".global context_switch",
-    ".type   context_switch, %function",
-    "context_switch:",
-    "push {{r0-r12, lr}}",
-    "str  sp, [r0]",
-    "ldr  sp, [r1]",
-    "pop  {{r0-r12, lr}}",
-    "bx   lr",
+global_asm!(r#"
+    .global context_switch
+    .type   context_switch, %function
+    context_switch:
+    push {{r0-r12, lr}}
+    str  sp, [r0]
+    ldr  sp, [r1]
+    pop  {{r0-r12, lr}}
+    bx   lr
 
-    ".global start_first_task",
-    ".type   start_first_task, %function",
-    "start_first_task:",
-    "ldr  sp, [r0]",
-    "pop  {{r0-r12, lr}}",
-    "bx   lr",
-);
+    .global start_first_task
+    .type   start_first_task, %function
+    start_first_task:
+    ldr  sp, [r0]
+    pop  {{r0-r12, lr}}
+    bx   lr
+"#);
 
 unsafe extern "C" {
     pub fn context_switch(curr: *mut Task, next: *const Task);

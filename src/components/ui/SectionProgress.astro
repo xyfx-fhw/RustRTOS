@@ -208,6 +208,7 @@ const hasSections = h1s.length > 0;
           window.scrollTo({ top: contentTop, behavior: 'instant' });
         }
       }
+      window.dispatchEvent(new CustomEvent('sp-tab-changed', { detail: { tabIdx: idx } }));
     }
 
     function refreshTabs(): void {

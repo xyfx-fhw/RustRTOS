@@ -22,6 +22,17 @@ keywords: ["裸机", "bare-metal", "启动流程", "Cortex-R52", "no_std", "rese
 
 了解 `fn main()`、`loop {}`、基本类型即可。本章不涉及复杂的 Rust 语法。
 
+## 本章要实现什么
+
+本章分两篇文章完成一个最小的裸机程序，能在 QEMU 上跑起来并进入一个死循环：
+
+| 文章 | 内容 |
+| --- | --- |
+| [01 · 内存布局与链接脚本](./01-memory-layout.md) | 设计 Flash / RAM 的内存布局，编写链接脚本控制代码放置位置 |
+| [02 · 汇编入口与 Rust 程序](./02-reset-handler.md) | 编写 reset handler 汇编，搭建 `#[no_std]` 的 Rust 入口 |
+
+最终验证标准：运行 `qemu-system-arm` 启动程序后，QEMU 不报错、不崩溃，程序进入死循环保持运行。
+
 # 裸机程序和普通程序的区别
 
 平时写的程序——无论是 Python 脚本还是一个 Rust 命令行工具——其实都运行在操作系统提供的"舒适环境"里：
@@ -52,17 +63,6 @@ keywords: ["裸机", "bare-metal", "启动流程", "Cortex-R52", "no_std", "rese
 4. 跳转到 Rust 入口函数
 
 这段汇编代码通常叫做 **reset handler**（复位处理程序）。
-
-# 本章要实现什么
-
-本章分两篇文章完成一个最小的裸机程序，能在 QEMU 上跑起来并进入一个死循环：
-
-| 文章 | 内容 |
-| --- | --- |
-| [01 · 内存布局与链接脚本](./01-memory-layout.md) | 设计 Flash / RAM 的内存布局，编写链接脚本控制代码放置位置 |
-| [02 · 汇编入口与 Rust 程序](./02-reset-handler.md) | 编写 reset handler 汇编，搭建 `#[no_std]` 的 Rust 入口 |
-
-最终验证标准：运行 `qemu-system-arm` 启动程序后，QEMU 不报错、不崩溃，程序进入死循环保持运行。
 
 # 练习题
 
