@@ -1,24 +1,25 @@
 ---
 title: "GIC 中断控制器与定时器中断"
-description: "配置 GICv3 中断控制器，启动 CMSDK DualTimer，实现第一个真正响应硬件的 IRQ handler"
+description: "配置 GICv3 中断控制器，启动 CMSDK DualTimer，实现第一个真正响应硬件的 FIQ handler"
 difficulty: advanced
 estimatedTime: 75
-keywords: ["GIC", "GICv3", "GICD", "ICC", "定时器", "DualTimer", "IRQ handler", "INTID"]
+keywords: ["GIC", "GICv3", "GICD", "ICC", "定时器", "DualTimer", "FIQ handler", "INTID", "Group 0"]
 ---
 
 # 本章目标
 
 - 理解 GICv3 的三个组件（Distributor、Redistributor、CPU Interface）及其职责
-- 配置 GICD 使能 Timer 中断，配置 ICC 系统寄存器使能 CPU 端中断接收
+- 理解中断组别（Group 0 / Group 1）与 FIQ / IRQ 投递路径的关系
+- 配置 GICD 使能 Timer 中断，配置 ICC 系统寄存器使能 CPU 端 FIQ 接收
 - 配置 CMSDK DualTimer 产生周期性定时中断
-- 实现完整的 IRQ handler：应答 → 处理 → 清除 → EOI
+- 实现完整的 FIQ handler：应答 → 处理 → 清除 → EOI
 - 在 QEMU 上看到定时器每秒输出一次 tick 计数
 
 ## 前置知识
 
 ### 已完成的章节
 
-`04-exceptions-and-interrupts/01-exception-handlers.md` 已完成，`irq_handler` 汇编包装器和 `rust_irq_handler` 占位函数均已就位。
+`04-exceptions-and-interrupts/01-exception-handlers.md` 已完成，`fiq_handler` 汇编包装器和 `rust_fiq_handler` 占位函数均已就位。
 
 ### 理解内存映射寄存器
 
@@ -42,23 +43,24 @@ GICv3 分为三个层次：
 CPU 读取"是哪个中断触发了我"（IAR），处理完后通知 GIC"我搞定了"（EOI）。
 - 通过 AArch32 的 `MRC`/`MCR` 指令访问，**不是**内存映射
 
-三者的协作流程：
-
-```text
-外设发出中断信号
-     ↓
-Distributor（GICD）判断路由给哪个 CPU
-     ↓
-Redistributor（GICR）转发给对应 CPU 的 IRQ 输入
-     ↓
-CPU 执行向量表 0x00000018 的 b irq_handler
-     ↓
-irq_handler 读 ICC_IAR1 获取 INTID
-     ↓
-处理中断，清除外设的中断标志
-     ↓
-写 ICC_EOIR1 通知 GIC 结束
-```
+> **💡 什么是系统寄存器，和内存映射有什么区别？**
+>
+> 前面的 GICD 和 GICR 都是**内存映射寄存器**——它们被映射到一个普通内存地址，用指针读写即可，就像操作 UART 一样：
+>
+> ```rust
+> let ctrl = 0xf0000000 as *mut u32;
+> ctrl.write_volatile(0x1);
+> ```
+>
+> CPU Interface 则不同。它是每个 CPU 核**内部的私有接口**，没有内存地址，只能用专用指令直接与 CPU"对话"：
+>
+> ```rust
+> // 读 ICC_IAR0（当前中断编号）
+> core::arch::asm!("mrc p15, 0, {0}, c12, c8, 0", out(reg) intid);
+> // 写 ICC_PMR（优先级掩码）
+> core::arch::asm!("mcr p15, 0, {0}, c4, c6, 0", in(reg) 0xFFu32);
+> ```
+> `mrc`/`mcr` 是 ARM 访问"协处理器寄存器"的专用指令，`p15` 是负责系统控制的 15 号协处理器，`c12, c8, 0` 是目标寄存器在其中的编号。这类寄存器天然按核隔离——多核系统里每个核的 `mrc` 只读自己核的状态，不会互相干扰，也不占用内存地址空间。
 
 # 中断编号（INTID）
 
@@ -80,9 +82,68 @@ mps3-an536 上 CMSDK DualTimer 的中断连接（来自 QEMU 源码 `mps3r.c`）
 
 本章使用 **Timer 1**，INTID = **33**。
 
-# 配置 GIC
+# 中断组别与 FIQ 路径
 
-> **实践中发现：** mps3-an536 上 INTID 33 默认在 **Group 0（Secure）**，会作为 **FIQ** 而非 IRQ 投递。这是因为 Cortex-R52 以 HYP 模式启动，Group 1 NS 的访问受限。本章选择配合 FIQ 路径（使用 `fiq_handler` 和 `rust_fiq_handler`），而非 IRQ 路径。
+在正式写代码之前，必须先搞清楚一件关键的事：**本章的 Timer 中断到底会触发 FIQ 还是 IRQ？**
+
+## Group 0 与 Group 1
+
+GIC 把每个中断源分配到两个"组"之一：
+
+| 组别 | 安全属性 | CPU 侧信号 | 向量表地址 |
+| --- | --- | --- | --- |
+| **Group 0** | Secure（安全） | **FIQ** | `0x0000001C` |
+| **Group 1** | Non-Secure（非安全） | **IRQ** | `0x00000018` |
+
+这不是软件的选择，而是硬件的路由规则：属于哪个组，就会触发哪种异常信号。
+
+## mps3-an536 的默认状态
+
+mps3-an536 上电时，所有外设中断（包括 Timer 1 的 INTID 33）**默认都在 Group 0**。
+
+这背后的设计逻辑是：Group 0 的中断触发 FIQ，而 FIQ 只会路由到安全世界的 handler，普通世界的代码完全碰不到它。把所有中断默认归入 Group 0，等于说"上电初始状态下，所有中断只有安全世界才能处理"——这样即使普通世界的代码出了问题，也无法截获或干扰中断处理流程。
+
+简单类比：把所有快递默认放进只有安全员才能开的**保密箱（Group 0）**，而不是人人都能拿的**普通箱（Group 1）**，是为了防止普通员工随意拿走。
+
+因此：**Timer 1 触发后，CPU 收到的是 FIQ，不是 IRQ。**
+
+> **💡 为什么不把 Timer 挪到 Group 1 去触发 IRQ？**
+> 技术上可以——向 GICD_IGROUPR1 写入相应 bit 就能把 INTID 33 重新分配到 Group 1。但这需要在安全状态（EL3 / Secure SVC）下操作，而我们从 HYP 模式启动本身就有权限限制，配置起来需要额外的安全上下文切换，引入不必要的复杂度。
+>
+> 既然 Timer 默认触发 FIQ，本章就直接**顺着这条路走**，在 `fiq_handler` 里处理它。这正是上一章我们留了 `rust_fiq_handler` 占位函数的原因。
+
+> **💡 已经切换到 SVC 模式了，还能用 Group 0 吗？**
+> 可以。**CPU 特权级**（HYP/SVC）和 **GIC 安全组**（Group 0/1）是两套正交的机制，各管各的：
+> - CPU 特权级控制的是"能不能执行某些特权指令"
+> - GIC 安全组的访问权限由 **Security State（安全状态）** 决定，不是 CPU 特权级
+>
+> 从 HYP 切到 SVC 只改变了特权级，没有改变 Security State，因此对 GIC Group 0 的访问能力不受影响。另外，FIQ 触发时 CPU 硬件会自动从任何当前模式切换到 FIQ 模式（0x11）再跳向量表，跟之前处于 SVC 还是别的模式无关。
+>
+> 在真实的完整 TrustZone 系统中，Non-Secure 代码确实无法配置 Group 0——但 Cortex-R52 没有 EL3，且 QEMU 不强制执行 GIC 的安全访问限制，所以在我们的环境里一切正常。
+
+## FIQ 完整处理路径
+
+明确了走 FIQ 路径，整个流程如下：
+
+```text
+Timer 1 超时，发出中断信号
+     ↓
+Distributor（GICD）确认 INTID 33 已使能，路由给 CPU 0
+     ↓
+Redistributor（GICR）转发 FIQ 信号给 CPU 0
+     ↓
+CPU 跳到向量表 0x0000001C，执行 b fiq_handler
+     ↓
+fiq_handler 读 ICC_IAR0 获取 INTID（标记为 Active）
+     ↓
+确认是 INTID 33，清除 Timer 1 的中断标志位
+     ↓
+写 ICC_EOIR0 通知 GIC 中断处理完成（恢复为 Inactive）
+```
+
+GIC 侧用的寄存器都是 **Group 0** 接口：`ICC_IAR0`（应答）和 `ICC_EOIR0`（结束通知），对应 AArch32 的 `c12, c8, 0` 和 `c12, c8, 1`。
+
+# 配置 GIC
 
 ## 本章新增文件结构
 
@@ -114,7 +175,7 @@ pub fn gic_init() {
         GICR_WAKER.write_volatile(waker & !0x2);
         while GICR_WAKER.read_volatile() & 0x4 != 0 {}
 
-        // 2. 使能 Distributor Group 1（bit 0 = EnableGrp1）
+        // 2. 使能 Distributor Group 0（bit 0 = EnableGrp0）
         GICD_CTLR.write_volatile(0x1);
 
         // 3. INTID 33：设置优先级、路由到 CPU 0、使能
@@ -147,24 +208,61 @@ pub fn gic_eoi0(intid: u32) {
 }
 ```
 
-**步骤说明：**
+**每一步的作用：**
 
-| 步骤 | 作用 |
-| --- | --- |
-| 唤醒 GICR_WAKER | Redistributor 上电睡眠，必须先醒来才能接收中断 |
-| GICD_CTLR = 0x1 | 使能 Distributor Group 0（bit 0 = EnableGrp0，INTID 33 在 Group 0） |
-| GICD_IPRIORITYR[33] | 设置 INTID 33 的优先级（数值越小优先级越高） |
-| GICD_ITARGETSR[33] | 路由到 CPU 0（GICv2 兼容模式，bit N = CPU N） |
-| GICD_ISENABLER1 bit 1 | 使能 INTID 33（bit 位置 = 33 % 32 = 1） |
-| ICC_PMR = 0xFF | 优先级掩码：允许所有优先级的中断通过（默认值 0 屏蔽一切） |
-| ICC_IGRPEN0 = 1 | CPU Interface 侧 Group 0 使能（默认 0，不配置则 FIQ 永远不到达 CPU） |
+| 步骤 | 寄存器 | 作用 |
+| --- | --- | --- |
+| 唤醒 Redistributor | `GICR_WAKER` | 上电时 Redistributor 处于睡眠状态，必须先唤醒才能转发中断 |
+| 使能 Distributor | `GICD_CTLR = 0x1` | 打开 Group 0 的全局开关（EnableGrp0），否则 GICD 不转发任何中断 |
+| 设置优先级 | `GICD_IPRIORITYR[33]` | 数值越小优先级越高，`0xA0` 是一个中等优先级 |
+| 路由到 CPU 0 | `GICD_ITARGETSR[33]` | bit 0 = CPU 0，GICv2 兼容模式下按 bit 位选择目标核 |
+| 使能 INTID 33 | `GICD_ISENABLER1` bit 1 | bit 位置 = 33 % 32 = 1，对应 ISENABLER[1] 的 bit 1 |
+| 优先级掩码 | `ICC_PMR = 0xFF` | 允许所有优先级通过；**默认值 0 会屏蔽所有中断** |
+| CPU 侧 Group 0 使能 | `ICC_IGRPEN0 = 1` | 打开 CPU Interface 的 Group 0 投递；**默认值 0，FIQ 永远到不了 CPU** |
 
 > **注意（QEMU Cortex-R52 上的 ICC_* 访问）：**
 >
 > - **ICC_SRE**（c12, c12, 5）在 QEMU Cortex-R52 上写入会触发未定义指令异常——QEMU 默认已将其永久置 1（系统寄存器接口始终开启），不需要也不允许软件再设置。
-> - **ICC_PMR**（c4, c6, 0）和 **ICC_IGRPEN0**（c12, c12, 6）**必须手动配置**：QEMU 的默认值均为 0，ICC_PMR=0 会屏蔽所有中断（优先级条件 `prio < 0` 永不成立），ICC_IGRPEN0=0 则关闭 CPU Interface 侧的 Group 0 投递。两者缺一不可，否则 FIQ 永远无法到达 CPU。
+> - **ICC_PMR** 和 **ICC_IGRPEN0** 必须手动配置，两者缺一不可。
 
 ## 新建 src/timer.rs
+
+mps3-an536 上有一个 **CMSDK APB Dual Timer** 外设，包含两个独立的倒计时器（Timer 1 / Timer 2）。工作原理很直接：把一个初值写进 LOAD 寄存器，计数器从这个值开始递减，减到 0 后触发中断，然后自动重新装载 LOAD 值继续计数——这就是周期中断的全部逻辑。
+
+Timer 1 的寄存器基址是 `0xe0101000`，我们只用其中三个：
+
+| 偏移 | 名称 | 作用 |
+| --- | --- | --- |
+| `+0x000` | LOAD | 装载值。计数器归零后从这里重新装载，决定中断周期 |
+| `+0x008` | CONTROL | 控制寄存器，各 bit 控制计数器行为（见下文） |
+| `+0x00C` | INTCLR | 中断清除。向此地址写任意值，清除 Timer 1 的中断标志 |
+
+CONTROL 寄存器各 bit 的含义：
+
+| bit | 名称 | 我们的值 | 说明 |
+| --- | --- | --- | --- |
+| 7 | TimerEn | 1 | 启动计数器 |
+| 6 | TimerMode | 1 | 1 = 周期模式（归零后自动重载），0 = 自由运行 |
+| 5 | IntEnable | 1 | 归零时触发中断 |
+| 3 | TimerSize | 1 | 1 = 32 位计数器，0 = 16 位 |
+| 2:1 | TimerPre | 00 | 预分频：00 = 不分频（直接用系统时钟） |
+| 0 | OneShot | 0 | 0 = 循环触发，1 = 只触发一次 |
+
+`0xE8 = 1110_1000b`，对应 TimerEn=1、TimerMode=1、IntEnable=1、TimerSize=1，其余位为 0。
+
+**周期计算：**
+
+```text
+QEMU mps3-an536 Timer 时钟 = 50 MHz = 50_000_000 次/秒
+目标周期 = 100 ms = 0.1 秒
+LOAD 值 = 50_000_000 × 0.1 = 5_000_000
+```
+
+计数器从 5_000_000 递减到 0 恰好需要 100 ms，每 100 ms 触发一次中断，10 次后 `TICK_COUNT` 是 10，`println!` 打印一行，所以终端里约每秒出现一行 `Tick`。
+
+**为什么 `TIMER1INTCLR` 要单独声明为 `pub const`，而不是写在 `timer_init` 里？**
+
+因为它需要在 `fiq_handler` 里使用——每次 FIQ 触发后，必须写这个地址清除 Timer 1 的中断标志，GIC 才能在下次中断到来时正常投递。如果不清除，Timer 1 的中断线会一直保持高电平，FIQ 处理刚结束就立刻又来一次，形成死循环。把它暴露成 `pub const` 让 `main.rs` 可以直接引用。
 
 ```rust
 pub const TIMER1INTCLR: *mut u32 = (0xe0101000usize + 0x00C) as *mut u32;
@@ -176,7 +274,7 @@ pub fn timer_init() {
 
         // 50 MHz 时钟，100 ms 周期 = 50_000_000 × 0.1 = 5_000_000
         load.write_volatile(5_000_000);
-        // 0xE8 = TimerEn | TimerMode | IntEnable | TimerSize（32 位）
+        // 0xE8 = TimerEn(1) | TimerMode(1) | IntEnable(1) | TimerSize=32bit(1)
         control.write_volatile(0xE8);
     }
 }
@@ -191,7 +289,7 @@ mod gic;
 mod timer;
 ```
 
-在 `rust_main` 里调用初始化，最后才开中断：
+在 `rust_main` 里按顺序完成初始化，**最后才开中断**：
 
 ```rust
 #[unsafe(no_mangle)]
@@ -209,6 +307,20 @@ pub extern "C" fn rust_main() -> ! {
 }
 ```
 
+> **`cpsie if` 是什么？**
+>
+> `cps`（Change Processor State）是 ARM 专门用来修改 CPSR 中断屏蔽位的指令：
+> - `cpsie` — **ie** = Interrupt Enable，**开启**中断
+> - `cpsid` — **id** = Interrupt Disable，**关闭**中断
+>
+> 后面跟的字母表示操作哪些位：
+> - `i` — CPSR 的 **I 位**（bit 7），控制 IRQ：I=1 屏蔽，I=0 放行
+> - `f` — CPSR 的 **F 位**（bit 6），控制 FIQ：F=1 屏蔽，F=0 放行
+>
+> 所以 `cpsie if` 就是同时清零 I 位和 F 位，让 IRQ 和 FIQ 都能到达 CPU。
+>
+> 回想一下第 2 章 HYP→SVC 模式切换时，我们写的是 `mov r0, #0xd3`（即 `1101_0011`），其中 bit 7=1、bit 6=1，这意味着切换到 SVC 模式时 **IRQ 和 FIQ 都是关闭的**。`cpsie if` 就是在这里把它们重新打开。
+
 > **注意：** `cpsie if` 必须在 GIC 和 Timer **都初始化完毕后**才执行。过早打开中断，可能在 FIQ handler 里读到未初始化的变量。
 
 添加 `TICK_COUNT` 全局变量和完整的 `rust_fiq_handler`（替换原来的空函数）：
@@ -218,7 +330,7 @@ static mut TICK_COUNT: u32 = 0;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_fiq_handler() {
-    let intid = gic::gic_ack0();  // 应答，把中断标为 Active
+    let intid = gic::gic_ack0();  // 读 ICC_IAR0，标记为 Active
 
     if intid == 33 {
         unsafe {
@@ -232,11 +344,11 @@ pub extern "C" fn rust_fiq_handler() {
         }
     }
 
-    gic::gic_eoi0(intid);  // 通知 GIC 处理完毕
+    gic::gic_eoi0(intid);  // 写 ICC_EOIR0，通知 GIC 处理完毕
 }
 ```
 
-`rust_irq_handler` 保持上一章的**空函数**不变——本章 Timer 中断走 FIQ 路径，IRQ handler 在这章不会被触发。
+`rust_irq_handler` 保持上一章的**空函数**不变——本章 Timer 中断走 FIQ 路径，IRQ handler 不会被触发。
 
 # 验证方法
 
@@ -252,8 +364,7 @@ qemu-system-arm \
 
 ```text
 Hello from RTOS!
-Initializing GIC and Timer...
-Timer started. Waiting for interrupts...
+Timer started. Waiting for FIQ...
 Tick: 10
 Tick: 20
 Tick: 30
@@ -261,7 +372,7 @@ Tick: 30
 
 按 **Ctrl+A 然后 X** 退出。
 
-> **注意：** 如果只看到前三行但没有 Tick 输出，用以下命令确认 FIQ 是否被触发：
+> **注意：** 如果只看到前两行但没有 Tick 输出，用以下命令确认 FIQ 是否被触发：
 >
 > ```bash
 > qemu-system-arm -machine mps3-an536 -nographic \
@@ -273,36 +384,36 @@ Tick: 30
 
 ```quiz single
 Q: GICv3 中，Distributor（GICD）和 CPU Interface（ICC_*）的主要区别是什么？
-- GICD 负责高优先级中断，ICC 负责低优先级中断
 + GICD 是全局共享的内存映射寄存器，管理 SPI 的路由和使能；ICC 是每个 CPU 核私有的系统寄存器，负责中断应答和结束通知
+- GICD 负责高优先级中断，ICC 负责低优先级中断
 - GICD 在 Flash 里，ICC 在 RAM 里
 - GICD 处理外部中断，ICC 处理软件中断
 E: Distributor 是整个系统共享的一块硬件（内存映射），管理所有 SPI 的全局配置（使能、优先级、路由目标）。CPU Interface 是每个核私有的接口，通过系统寄存器（MRC/MCR）访问，提供应答（IAR）和结束通知（EOIR）功能。
 ```
 
 ```quiz single
-Q: FIQ handler 中，为什么必须先读 ICC_IAR0（应答），再清除外设中断标志，最后写 ICC_EOIR0？
-- 只是惯例，顺序不影响结果
-+ 先读 IAR 让 GIC 把该中断标为"处理中"防止重复分发；清外设标志须在 EOI 前，否则 GIC 完成 EOI 后立即收到新中断；最后 EOI 恢复为 Inactive 状态
-- 因为 IAR 和 EOIR 是同一个寄存器，必须成对使用
-- 因为编译器会对读写重排，必须按此顺序防止重排
-E: 读 IAR 把中断标记为 Active，防止 GIC 重复分发。在 EOI 之前清除外设标志，否则 GIC 完成 EOI 后外设立刻再次拉高中断线，形成中断风暴。最后 EOI 把状态从 Active 恢复为 Inactive，允许下一次触发。
+Q: mps3-an536 上 Timer 1（INTID 33）触发的是 FIQ 而不是 IRQ，根本原因是什么？
+- 因为 Timer 1 的硬件连线直接连到 FIQ 引脚
++ 因为 INTID 33 默认在 GIC Group 0，Group 0 中断固定投递为 FIQ 信号
+- 因为我们在 gic_init 里把它配置成了 FIQ
+- 因为 Cortex-R52 的 IRQ 通道被 GIC 占用了
+E: GIC 把每个中断分配到 Group 0 或 Group 1。Group 0 对应安全（Secure）中断，硬件路由为 FIQ；Group 1 对应非安全（Non-Secure）中断，路由为 IRQ。mps3-an536 上电时所有外设中断默认在 Group 0，因此 Timer 1 触发 FIQ。
 ```
 
 ```quiz single
-Q: GICD_ISENABLER[1] 寄存器（地址 GICD_BASE + 0x104）的 bit 1 对应哪个 INTID？
-- INTID 1
-- INTID 32
-+ INTID 33
-- INTID 64
-E: GICD_ISENABLER 数组中，ISENABLER[n] 的 bit m 对应 INTID (32n + m)。ISENABLER[1] 的 bit 1 = INTID (32×1 + 1) = 33。这正好是 mps3-an536 上 Timer 1 的 INTID。
+Q: FIQ handler 中，为什么必须先读 ICC_IAR0（应答），再清除外设中断标志，最后写 ICC_EOIR0？
+- 只是惯例，顺序不影响结果
+- 因为编译器会对读写重排，必须按此顺序防止重排
+- 因为 IAR0 和 EOIR0 是同一个寄存器，必须成对使用
++ 先读 IAR0 让 GIC 把该中断标为"处理中"防止重复分发；清外设标志须在 EOI 前，否则 GIC 完成 EOI 后立即收到新中断；最后 EOI 恢复为 Inactive 状态
+E: 读 IAR0 把中断标记为 Active，防止 GIC 重复分发。在 EOI 之前清除外设标志，否则 GIC 完成 EOI 后外设立刻再次拉高中断线，形成中断风暴。最后 EOI 把状态从 Active 恢复为 Inactive，允许下一次触发。
 ```
 
 ```quiz single
 Q: 为什么 cpsie if（同时开 IRQ 和 FIQ）要放在 GIC 和 Timer 都初始化完之后？
 - 因为 cpsie 指令本身依赖 GIC 才能执行
-+ 防止在外设配置未完成时收到中断，handler 会访问未初始化的硬件和变量，导致不可预期的行为
-- 因为 ARM 架构规定 cpsie 必须是 rust_main 的最后一条指令
 - 因为 Timer 在 cpsie 之前硬件上不产生中断信号
+- 因为 ARM 架构规定 cpsie 必须是 rust_main 的最后一条指令
++ 防止在外设配置未完成时收到中断，handler 会访问未初始化的硬件和变量，导致不可预期的行为
 E: 如果先开中断，定时器配置未完成时可能就触发了 FIQ，fiq_handler 会访问未初始化的全局变量和寄存器，结果随机出错。先完成全部硬件初始化，最后打开中断接收，是嵌入式初始化的标准做法。
 ```

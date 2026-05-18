@@ -87,13 +87,13 @@ keywords: ["reset handler", "汇编", "no_std", "no_main", "栈初始化", "BSS"
 
 ```asm
     // 放在 .text.reset_handler 节，链接脚本会把它放到 0x00000000
-    .section .text.reset_handler, "ax"
-    .global reset_body
-reset_body:
+    .section .text.reset_handler, “ax”
+    .global reset_handler
+reset_handler:
 ```
-- **`.section .text.reset_handler, "ax"`**：这是一句编译指令（Directive）。它告诉汇编器把接下来的代码放到名叫 `.text.reset_handler` 的特殊段（Section）里。末尾的 `"ax"` 表示这段内存应当分配且具有可执行权限（Allocatable & Executable）。我们在上一节链接脚本里写过，把 `.text.reset_handler` 固定在 `0x00000000` 首地址，这句指令就完美地跟链接脚本配合在了一起。
-- **`.global reset_body`**：将 `reset_body` 这个标签暴露成全局符号。这相当于在一个 C 文件里写非 `static` 函数，其他文件也能“看到”它。
-- **`reset_body:`**：标志这段代码在这里真正开始。
+- **`.section .text.reset_handler, “ax”`**：这是一句编译指令（Directive）。它告诉汇编器把接下来的代码放到名叫 `.text.reset_handler` 的特殊段（Section）里。末尾的 `”ax”` 表示这段内存应当分配且具有可执行权限（Allocatable & Executable）。我们在上一节链接脚本里写过，把 `.text.reset_handler` 固定在 `0x00000000` 首地址，这句指令就完美地跟链接脚本配合在了一起。
+- **`.global reset_handler`**：将 `reset_handler` 这个标签暴露成全局符号。这相当于在一个 C 文件里写非 `static` 函数，其他文件也能”看到”它。
+- **`reset_handler:`**：标志这段代码在这里真正开始。
 
 ---
 
@@ -111,7 +111,7 @@ reset_body:
 解决方案是在启动最开头检测是否处于 HYP 模式，如果是，主动“降级”并立刻用 `eret` 切换到 SVC 模式：
 
 ```asm
-reset_body:
+reset_handler:
     @ 检测 HYP 模式（mps3-an536 以 HYP 启动）
     mrs r0, cpsr
     and r0, r0, #0x1f      @ 取出 CPSR.M（模式位）
@@ -119,7 +119,7 @@ reset_body:
     bne .Lnormal_init      @ 不是 HYP，跳过切换
 
     @ 在 HYP 模式：设置 SPSR_hyp = SVC + I+F 禁用，然后 ERET
-    mov r0, #0xd3          @ SVC 模式 | I=1 | F=1
+    mov r0, #0xd3          @ SVC 模式（AArch32 EL1）| I=1 | F=1
     msr spsr_cxsf, r0
     adr r0, .Lnormal_init  @ 切换后的入口地址
     msr elr_hyp, r0
@@ -208,8 +208,8 @@ use core::panic::PanicInfo;
 global_asm!(r#"
     // 放在 .text.reset_handler 节，链接脚本会把它放到 0x00000000
     .section .text.reset_handler, "ax"
-    .global reset_body
-    reset_body:
+    .global reset_handler
+    reset_handler:
 
     // 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
     mrs r0, cpsr
@@ -217,7 +217,7 @@ global_asm!(r#"
     cmp r0, #0x1a
     bne .Lnormal_init
     mov r0, #0xd3
-    msr spsr_cxsf, r0
+    msr spsr_cxsf, r0      // SVC 模式（AArch32 EL1），禁 IRQ/FIQ
     adr r0, .Lnormal_init
     msr elr_hyp, r0
     eret
@@ -310,18 +310,18 @@ cargo build
 ## 符号地址验证
 
 ```bash
-rust-nm target/armv8r-none-eabihf/debug/rtos | grep -E "reset_body|rust_main|_stack_start"
+rust-nm target/armv8r-none-eabihf/debug/rtos | grep -E "reset_handler|rust_main|_stack_start"
 ```
 
 预期输出：
 
 ```text
-00000000 T reset_body
+00000000 T reset_handler
 00000094 T rust_main
 10080000 A _stack_start
 ```
 
-- `reset_body` 在 `0x00000000`——CPU 上电第一条指令就是它 ✓
+- `reset_handler` 在 `0x00000000`——CPU 上电第一条指令就是它 ✓
 - `rust_main` 紧随其后在 Flash 里 ✓
 - `_stack_start` 在 `0x10080000`（BRAM 末尾）✓
 
@@ -370,7 +370,7 @@ E: Rust（和 C++）编译器会对函数名进行"名称修饰"，在编译后�
 ```quiz single
 Q: global_asm! 宏把汇编放在 .text.reset_handler 节，链接脚本里的哪一行保证了它被放在 0x00000000？
 - .text : { *(.text .text.*) } > FLASH
-- ENTRY(reset_body) 指令直接把函数放在地址 0
+- ENTRY(reset_handler) 指令直接把函数放在地址 0
 - FLASH : ORIGIN = 0x00000000 规定了所有代码的起始地址
 + KEEP(*(.text.reset_handler)) 在 .text 块的第一行，确保该节被放在 Flash 最开头
 E: KEEP(*(.text.reset_handler)) 在 .text 段的 SECTIONS 块里是第一条规则，链接器按顺序处理，所以 .text.reset_handler 节的内容被放在 .text 段的最前面。.text 段起始地址是 FLASH 的 ORIGIN，也就是 0x00000000。ENTRY() 只是声明 ELF 入口点，不改变代码的实际地址。

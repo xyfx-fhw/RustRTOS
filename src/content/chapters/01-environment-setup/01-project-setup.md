@@ -146,8 +146,8 @@ cat .cargo/config.toml
 
 ```quiz single
 Q: .cargo/config.toml 里 build-std = ["core"] 的作用是什么？
-- 下载 armv8r-none-eabihf 的预编译标准库
 + 在构建时从 rust-src 源码现场编译 core 库，因为 Tier 3 目标没有官方预编译版本
+- 下载 armv8r-none-eabihf 的预编译标准库
 - 把 core 库复制到项目目录
 - 允许项目使用 std 标准库
 E: armv8r-none-eabihf 是 Tier 3，Rust 官方不提供预编译的 core。build-std 指示 Cargo 在每次构建时，读取 rust-src 里的源码，编译出适合这个目标架构的 core 库，再和项目代码链接在一起。
@@ -156,8 +156,8 @@ E: armv8r-none-eabihf 是 Tier 3，Rust 官方不提供预编译的 core。build
 ```quiz single
 Q: 为什么 [profile.dev] 也要设置 opt-level = "s"？
 - 因为 "s" 能让 debug 信息更完整
-+ 因为 mps3-an536 的 Flash 只有 32KB，不优化的 debug binary 体积过大会导致链接失败
-- 因为 Rust 裸机程序必须使用优化才能正常运行
 - 为了和 release 配置保持一致
+- 因为 Rust 裸机程序必须使用优化才能正常运行
++ 因为 mps3-an536 的 Flash 只有 32KB，不优化的 debug binary 体积过大会导致链接失败
 E: 嵌入式芯片的 Flash 容量有限，mps3-an536 只有 32KB。Rust 的 debug 构建默认不做任何优化，生成的 binary 可能几百 KB，远超 Flash 容量。opt-level = "s" 让编译器优化代码体积，是裸机嵌入式的标准做法。
 ```

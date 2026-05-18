@@ -12,7 +12,7 @@ use core::panic::PanicInfo;
 
 global_asm!(r#"
     // 向量表
-    .section .text.vector_table, "ax"
+    .section .text.vector_table, ax
     .global _vectors
     _vectors:
     b reset_body
@@ -25,68 +25,101 @@ global_asm!(r#"
     b fiq_handler
 
     // 异常处理函数
-    .section .text.handlers, "ax"
+    .section .text.handlers, ax
     undef_handler:
-    push {{r0-r12, lr}}", "bl rust_undef_handler
-    pop {{r0-r12, lr}}",  "movs pc, lr
+    push {{r0-r12, lr}}
+    bl rust_undef_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
 
     svc_handler:
-    push {{r0-r12, lr}}", "bl rust_svc_handler
-    pop {{r0-r12, lr}}",  "movs pc, lr
+    push {{r0-r12, lr}}
+    bl rust_svc_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
 
     prefetch_handler:
     sub lr, lr, #4
-    push {{r0-r12, lr}}", "bl rust_prefetch_handler
-    pop {{r0-r12, lr}}",  "movs pc, lr
+    push {{r0-r12, lr}}
+    bl rust_prefetch_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
 
     data_handler:
     sub lr, lr, #8
-    push {{r0-r12, lr}}", "bl rust_data_handler
-    pop {{r0-r12, lr}}",  "movs pc, lr
+    push {{r0-r12, lr}}
+    bl rust_data_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
 
     hang:
-    wfi", "b hang
+    wfi
+    b hang
 
     irq_handler:
-    push {{r0-r12, lr}}", "bl rust_irq_handler
-    pop {{r0-r12, lr}}",  "subs pc, lr, #4
+    push {{r0-r12, lr}}
+    bl rust_irq_handler
+    pop {{r0-r12, lr}}
+    subs pc, lr, #4
 
     fiq_handler:
-    push {{r0-r12, lr}}", "bl rust_fiq_handler
-    pop {{r0-r12, lr}}",  "subs pc, lr, #4
+    push {{r0-r12, lr}}
+    bl rust_fiq_handler
+    pop {{r0-r12, lr}}
+    subs pc, lr, #4
 
     // Reset handler
-    .section .text.reset_handler, "ax"
+    .section .text.reset_handler, ax
     .global reset_body
     reset_body:
     // mps3-an536 以 HYP 模式启动，需切换到 SVC 模式才能使用普通向量表
     mrs r0, cpsr
     and r0, r0, #0x1f
-    cmp r0, #0x1a",          // 0x1a = HYP 模式
+    cmp r0, #0x1a          // 0x1a = HYP 模式
     bne .Lnormal_init
-    mov r0, #0xd3",           // SVC 模式，禁 IRQ/FIQ
+    mov r0, #0xd3           // SVC 模式，禁 IRQ/FIQ
     msr spsr_cxsf, r0
     adr r0, .Lnormal_init
     msr elr_hyp, r0
-    eret",                    // 切换到 SVC 模式，跳到 .Lnormal_init
+    eret                    // 切换到 SVC 模式，跳到 .Lnormal_init
     .Lnormal_init:
     // 初始化各异常模式的栈指针（共享同一个栈顶，仅用于简单 fault 处理）
-    msr cpsr_c, #0xdb", "ldr sp, =_stack_start",  // Undefined 模式
-    msr cpsr_c, #0xd7", "ldr sp, =_stack_start",  // Abort 模式
-    msr cpsr_c, #0xd2", "ldr sp, =_stack_start",  // IRQ 模式
-    msr cpsr_c, #0xd1", "ldr sp, =_stack_start",  // FIQ 模式
-    msr cpsr_c, #0xd3", "ldr sp, =_stack_start",  // 回到 SVC 模式
-    ldr r0, =_sbss", "ldr r1, =_ebss", "mov r2, #0
-    1:", "cmp r0, r1", "bhs 2f
-    str r2, [r0]", "add r0, r0, #4", "b 1b
+    msr cpsr_c, #0xdb
+    ldr sp, =_stack_start  // Undefined 模式
+    msr cpsr_c, #0xd7
+    ldr sp, =_stack_start  // Abort 模式
+    msr cpsr_c, #0xd2
+    ldr sp, =_stack_start  // IRQ 模式
+    msr cpsr_c, #0xd1
+    ldr sp, =_stack_start  // FIQ 模式
+    msr cpsr_c, #0xd3
+    ldr sp, =_stack_start  // 回到 SVC 模式
+    ldr r0, =_sbss
+    ldr r1, =_ebss
+    mov r2, #0
+    1:
+    cmp r0, r1
+    bhs 2f
+    str r2, [r0]
+    add r0, r0, #4
+    b 1b
     2:
-    ldr r0, =_sdata", "ldr r1, =_edata", "ldr r2, =_sidata
-    3:", "cmp r0, r1", "bhs 4f
-    ldr r3, [r2]", "str r3, [r0]
-    add r0, r0, #4", "add r2, r2, #4", "b 3b
+    ldr r0, =_sdata
+    ldr r1, =_edata
+    ldr r2, =_sidata
+    3:
+    cmp r0, r1
+    bhs 4f
+    ldr r3, [r2]
+    str r3, [r0]
+    add r0, r0, #4
+    add r2, r2, #4
+    b 3b
     4:
     bl rust_main
-    5:", "wfi", "b 5b
+    5:
+    wfi
+    b 5b
 "#);
 
 static mut TASK_A: task::Task = task::Task { stack_ptr: core::ptr::null_mut() };

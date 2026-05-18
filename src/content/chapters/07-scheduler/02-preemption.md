@@ -265,8 +265,8 @@ E: ldr r0, =symbol 是伪指令，assembler 会生成 ldr r0, [PC, #N] 并在 li
 ```quiz single
 Q: 为什么 delay_ticks() 忙等时，低优先级任务仍然无法运行？
 - 因为 delay_ticks 内部禁止了 FIQ 中断
-+ 因为 delay_ticks 是忙等（不停轮询 get_ticks()），任务始终处于 Running/Ready 状态而非 Blocked；每次 FIQ 调度时高优先级任务仍然是"最高 Ready"，所以始终被选中
-- 因为调度器没有时间片机制
 - 因为 delay_ticks 使用了 WFI 指令让 CPU 休眠
+- 因为调度器没有时间片机制
++ 因为 delay_ticks 是忙等（不停轮询 get_ticks()），任务始终处于 Running/Ready 状态而非 Blocked；每次 FIQ 调度时高优先级任务仍然是"最高 Ready"，所以始终被选中
 E: Blocked 状态（真正的睡眠）意味着任务不参与调度，直到被事件唤醒。delay_ticks 只是一个轮询循环，任务还在 Running/Ready 状态。每次 FIQ 调度时，高优先级任务仍然满足"最高优先级 Ready"，所以总被选中。真正的优先级抢占（高优先级任务被唤醒后立刻打断低优先级）需要 Blocked 状态支持，这是第 08 章同步原语要实现的功能。
 ```

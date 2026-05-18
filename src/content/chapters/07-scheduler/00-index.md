@@ -1,5 +1,5 @@
 ---
-title: "调度器设计概述"
+title: "调度器设计"
 description: "理解 RTOS 调度器的整体设计：从协作式到真抢占，以及 FIQ 中断触发任务切换的完整方案"
 difficulty: intermediate
 estimatedTime: 20
@@ -50,7 +50,7 @@ Task A: ... do work ... → context_switch() → Task B 运行
 Task B: ... do work ... → context_switch() → Task A 运行
 ```
 
-**优点**：实现简单，任务完全控制切换时机。  
+**优点**：实现简单，任务完全控制切换时机。
 **缺点**：如果某个任务陷入死循环或长时间计算，其他任务永远得不到执行。
 
 ## 抢占式调度（本章实现）
@@ -62,7 +62,7 @@ Task A 运行 → FIQ 触发 → 保存 A 的完整现场 → 调度器选 B →
 Task B 运行 → FIQ 触发 → 保存 B 的完整现场 → 调度器选 C → 恢复 C 的现场 → C 继续运行
 ```
 
-**优点**：任务无需主动让出，即使某个任务死循环也不影响其他任务。  
+**优点**：任务无需主动让出，即使某个任务死循环也不影响其他任务。
 **缺点**：必须正确保存/恢复所有寄存器，包括条件标志（CPSR），稍有出错就会崩溃。
 
 # 16 字 Context Frame 设计
@@ -108,7 +108,7 @@ add  sp, sp, #4     ; 跳过 lr_svc 的 4 字节... 不对，见下
 
 这两条指令是 ARM 架构专门为操作系统上下文保存设计的：
 
-**`SRSDB SP!, #mode`**（Store Return State, Decrement Before）  
+**`SRSDB SP!, #mode`**（Store Return State, Decrement Before）
 把**当前模式**的 LR 和 SPSR 存到**指定模式**的栈上，再更新该模式的 SP。
 
 ```asm
@@ -120,7 +120,7 @@ SRSDB SP!, #0x13           ; 把 {LR_fiq, SPSR_fiq} 存入 SVC 模式的栈
 
 一条指令完成了"把 FIQ 模式里的中断现场信息转移到任务 SVC 栈"的操作，绕开了 FIQ r8-r12 banking 的问题。
 
-**`RFEIA SP!`**（Return From Exception, Increment After）  
+**`RFEIA SP!`**（Return From Exception, Increment After）
 从栈上加载 PC 和 CPSR，完成异常返回——恢复路径的最后一步。
 
 ```asm

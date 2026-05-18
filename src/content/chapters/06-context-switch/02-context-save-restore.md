@@ -338,8 +338,8 @@ Task B: 2
 
 ```quiz single
 Q: context_switch 里，push {r0-r12, lr} 之后为什么 str sp, [r0] 仍然有效（r0 还是 curr 的地址）？
-- 因为 push 之前编译器把 curr 备份到了另一个寄存器
 + 因为 push 只是把寄存器的值复制到栈内存，并不修改寄存器本身的值，所以 r0 在 push 后仍等于 curr 的地址
+- 因为 push 之前编译器把 curr 备份到了另一个寄存器
 - 因为 str 指令会自动从栈上读取 curr 的值
 - 因为 r0 是只读寄存器
 E: push {r0-r12, lr} 等价于 STMDB（存储多个寄存器并递减 sp），它把寄存器的当前值写入内存，然后移动 sp。寄存器的值本身不被清除也不被改变。所以 push 之后 r0 仍然保存着调用方传入的 curr 地址，str sp, [r0] 就把 sp 写入了 curr->stack_ptr 字段。
@@ -367,7 +367,7 @@ E: count 是 loop 内的局部变量，存在该任务的栈帧里。任务 A �
 Q: global_asm! 里写 {{r0-r12, lr}} 而不是 {r0-r12, lr}，原因是什么？
 - 因为 ARM 汇编要求双花括号
 - 因为 r0-r12 包含连字符，需要转义
-+ 因为 Rust 宏把单花括号 { } 解释为格式化占位符，双花括号 {{ }} 才能输出字面量的 { }
 - 因为 global_asm! 和 asm! 使用不同的语法规则
++ 因为 Rust 宏把单花括号 { } 解释为格式化占位符，双花括号 {{ }} 才能输出字面量的 { }
 E: Rust 的 format_args!/asm!/global_asm! 等宏都使用 { } 作为占位符语法。要在宏展开后输出字面量的花括号，必须写 {{ 和 }}，它们分别被转义为 { 和 }。ARM 汇编里的 push {r0-r12, lr} 需要字面量花括号，所以在 global_asm! 里必须写成 {{r0-r12, lr}}。
 ```

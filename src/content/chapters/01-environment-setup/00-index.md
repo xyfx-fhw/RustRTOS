@@ -259,7 +259,7 @@ E: eabi 是 Embedded ABI 的缩写，是 ARM 平台专有的嵌入式函数调�
 Q: 在 Linux 上安装 QEMU 后发现版本是 6.2.0，应该怎么处理？
 - 无需处理，6.2 已经足够运行 Cortex-R52 程序
 - 降级使用 Cortex-M 目标，因为它对 QEMU 版本要求更低
-+ 升级 QEMU 到 8.0 或更高，mps3-an536 machine type 在此版本之前不存在
 - 改用 armv7r-none-eabihf target，它支持旧版 QEMU
++ 升级 QEMU 到 8.0 或更高，mps3-an536 machine type 在此版本之前不存在
 E: mps3-an536 是在 QEMU 8.0 之后才加入的 machine type。版本 6.2 运行时会报 unsupported machine type 错误。需要升级 QEMU，这与使用哪个 Rust target 无关。
 ```

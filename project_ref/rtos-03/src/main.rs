@@ -7,7 +7,7 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 global_asm!(r#"
-    .section .text.reset_handler, "ax"
+    .section .text.reset_handler, ax
     .global reset_handler
     .type reset_handler, %function
     reset_handler:

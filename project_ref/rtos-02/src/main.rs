@@ -6,7 +6,7 @@ use core::panic::PanicInfo;
 
 global_asm!(r#"
     // 放在 .text.reset_handler 节，链接脚本会把它放到 0x00000000
-    .section .text.reset_handler, "ax"
+    .section .text.reset_handler, ax
     .global reset_body
     reset_body:
 

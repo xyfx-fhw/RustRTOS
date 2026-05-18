@@ -1,5 +1,5 @@
 ---
-title: "异常与中断体系概述"
+title: "异常与中断体系"
 description: "理解 ARMv8-R 的 8 种异常类型，实现向量表，为后续中断处理打好基础"
 difficulty: intermediate
 estimatedTime: 50
@@ -69,7 +69,7 @@ Cortex-R52 在 AArch32 状态下支持以下 8 种异常，每种都有固定的
 **ARMv8-R 的向量表**存的是**B 跳转指令本身**，CPU 发生异常时直接执行那一格里的指令：
 
 ```text
-0x00000000:  b reset_body         ← Reset 时 CPU 直接执行这条指令跳过去
+0x00000000:  b reset_handler      ← Reset 时 CPU 直接执行这条指令跳过去
 0x00000004:  b undef_handler      ← Undefined Instruction 时直接执行
 0x00000008:  b svc_handler
 0x0000000C:  b prefetch_handler
@@ -79,7 +79,15 @@ Cortex-R52 在 AArch32 状态下支持以下 8 种异常，每种都有固定的
 0x0000001C:  b fiq_handler
 ```
 
-8 个条目固定占 32 字节（每条 B 指令 4 字节）。向量表必须放在 `0x00000000`，CPU 在异常发生时直接用硬件逻辑计算偏移量，跳到对应条目执行。
+8 个条目固定占 32 字节（每条 B 指令 4 字节）。向量表的基地址默认在 `0x00000000`（由系统内部的 VBAR 寄存器决定）。
+
+> **🤔 释疑：CPU 怎么知道发生 SVC 异常时，要跑到 `0x00000008` 呢？**
+> 这是被**写死在芯片硅片里的硬件逻辑**！ARM 架构官方手册规定好了每种异常的具体“门牌号偏移量”。
+> - Reset 固定在基地址偏移 `0x00`
+> - Undefined Instruction 固定偏移 `0x04`
+> - SVC 固定偏移 `0x08`
+>
+> 当你的代码里执行了一条 `svc` 指令引发异常后，CPU 内部电路会瞬间强制把程序计数器（PC，即下一条要执行的指令地址）修改为 `0x00000000 + 0x08 = 0x00000008`。因为我们恰好在这个地址上填了一句 `b svc_handler`，所以 CPU 跑到这拿到指令后，立刻就被指引到了我们真正的处理函数里！
 
 > **注意：** 目前我们的代码在 `0x00000000` 直接放的是 reset handler 的初始化代码（`ldr sp, ...`）。一旦加入中断，CPU 收到 IRQ 就会跑到 `0x00000018` 执行初始化代码，结果不可预期。必须先把向量表补好。
 
@@ -126,49 +134,36 @@ global_asm!(r#"
     .section .text.vector_table, "ax"
     .global _vectors
     _vectors:
-    b reset_body",       // 0x00  Reset
-    b undef_handler",    // 0x04  Undefined Instruction
-    b svc_handler",      // 0x08  SVC
-    b prefetch_handler", // 0x0C  Prefetch Abort
-    b data_handler",     // 0x10  Data Abort
-    b hang",             // 0x14  HVC（暂不用）
-    b irq_handler",      // 0x18  IRQ  ← 下一章实现
-    b fiq_handler",      // 0x1C  FIQ
+    b reset_handler      // 0x00  Reset
+    b undef_handler      // 0x04  Undefined Instruction
+    b svc_handler        // 0x08  SVC
+    b prefetch_handler   // 0x0C  Prefetch Abort
+    b data_handler       // 0x10  Data Abort
+    b hang               // 0x14  HVC（暂不用）
+    b irq_handler        // 0x18  IRQ  ← 下一章实现
+    b fiq_handler        // 0x1C  FIQ
 
     // ── 异常处理桩：尚未实现的异常全部挂起 CPU ──
     .section .text.handlers, "ax"
-    undef_handler:",     "b undef_handler
-    svc_handler:",       "b svc_handler
-    prefetch_handler:",  "b prefetch_handler
-    data_handler:",      "b data_handler
-    hang:",              "wfi", "b hang
-    irq_handler:",       "b irq_handler",      // 下一章替换
-    fiq_handler:",       "b fiq_handler
+    undef_handler:       b undef_handler
+    svc_handler:         b svc_handler
+    prefetch_handler:    b prefetch_handler
+    data_handler:        b data_handler
+    hang:                wfi
+                         b hang
+    irq_handler:         b irq_handler      // 下一章替换
+    fiq_handler:         b fiq_handler
 "#);
 ```
 
-每个"处理桩"都是 `b <self>`（跳回自身的死循环）加上可选的 `wfi`（让 CPU 进入低功耗等待）。这比让 CPU 乱跑要安全得多——出了异常至少知道 CPU 卡在哪里。
+每个"处理桩"都是 `b <self>`（也就是跳回自身的死循环）加上可选的 `wfi`（让 CPU 进入低功耗等待）。比如 `undef_handler: b undef_handler`，一旦出现“未定义指令异常”，CPU 就会跳到这里并且永远在此打转。
+这主要是出于 **Fail-Safe（失效安全）** 设计原则：面临不知道如何处理的底层严重错误，宁可让系统卡在死循环停住，也不能让它带着错误状态像无头苍蝇一样乱跑。调试时只要暂停硬件，发现它卡在哪一行，就能立刻反推定位到触发了什么异常。
 
-> **提示：** 这是"fail-safe"设计原则：不知道如何处理的异常，宁可让系统安全地停住，也不能让它带着错误状态继续运行。
+> **🤔 释疑：向量表霸占了 `0x00000000` 首地址，那系统上电怎么找到初始化入口 `reset_handler` 的？**
+> 结合我们在“步骤一”更新的链接脚本来看：`.text.vector_table` 特意被放在了最前，紧随其后排布的才是存放初始化代码的 `.text.reset_handler`。
+> 当 CPU 上电时，它依然像以前一样从 `0x00000000` 第一时间盲读指令，而此时放在首地址的恰好是向量表的第 0 项——`b reset_handler`。这是一个无条件跳转指令，CPU 读到它后，就如同拿到了向导地图，立刻远距离跳转（Branch）到了真正干活的 `reset_handler` 代码段开始初始化。大门没变，只不过现在我们在门口加塞了一个“引路员”。
 
-## 步骤三：把 reset handler 改名为 reset_body
-
-向量表占据了 `0x00000000`，实际的初始化代码标号从 `reset_handler` 改为 `reset_body`（含义更准确）：
-
-```rust
-global_asm!(r#"
-    .section .text.reset_handler, "ax"
-    .global reset_body
-    reset_body:",           // ← 之前是 reset_handler
-
-    ldr sp, =_stack_start
-    // ... 清零 BSS、复制 .data ...
-    bl rust_main
-    5:", "wfi", "b 5b
-"#);
-```
-
-## 步骤四：完整的 src/main.rs
+## 步骤三：完整的 src/main.rs
 
 ```rust
 #![no_std]
@@ -184,7 +179,7 @@ global_asm!(r#"
     .section .text.vector_table, "ax"
     .global _vectors
     _vectors:
-    b reset_body
+    b reset_handler
     b undef_handler
     b svc_handler
     b prefetch_handler
@@ -195,34 +190,55 @@ global_asm!(r#"
 
     // 异常处理桩
     .section .text.handlers, "ax"
-    undef_handler:",     "b undef_handler
-    svc_handler:",       "b svc_handler
-    prefetch_handler:",  "b prefetch_handler
-    data_handler:",      "b data_handler
-    hang:",              "wfi", "b hang
-    irq_handler:",       "b irq_handler
-    fiq_handler:",       "b fiq_handler
+    undef_handler:       b undef_handler
+    svc_handler:         b svc_handler
+    prefetch_handler:    b prefetch_handler
+    data_handler:        b data_handler
+    hang:                wfi
+                         b hang
+    irq_handler:         b irq_handler
+    fiq_handler:         b fiq_handler
 
     // Reset handler（初始化代码）
     .section .text.reset_handler, "ax"
-    .global reset_body
-    reset_body:
+    .global reset_handler
+    reset_handler:
+    // 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
+    mrs r0, cpsr
+    and r0, r0, #0x1f
+    cmp r0, #0x1a
+    bne .Lnormal_init
+    mov r0, #0xd3
+    msr spsr_cxsf, r0
+    adr r0, .Lnormal_init
+    msr elr_hyp, r0
+    eret                    // 切换到 SVC 模式（AArch32 EL1），跳到 .Lnormal_init
+    .Lnormal_init:
+    // 1. 设置栈指针
     ldr sp, =_stack_start
     ldr r0, =_sbss
     ldr r1, =_ebss
     mov r2, #0
-    1:", "cmp r0, r1", "bhs 2f
-    str r2, [r0]", "add r0, r0, #4", "b 1b
+    1: cmp r0, r1
+       bhs 2f
+       str r2, [r0]
+       add r0, r0, #4
+       b 1b
     2:
     ldr r0, =_sdata
     ldr r1, =_edata
     ldr r2, =_sidata
-    3:", "cmp r0, r1", "bhs 4f
-    ldr r3, [r2]", "str r3, [r0]
-    add r0, r0, #4", "add r2, r2, #4", "b 3b
+    3: cmp r0, r1
+       bhs 4f
+       ldr r3, [r2]
+       str r3, [r0]
+       add r0, r0, #4
+       add r2, r2, #4
+       b 3b
     4:
     bl rust_main
-    5:", "wfi", "b 5b
+    5: wfi
+       b 5b
 "#);
 
 #[unsafe(no_mangle)]
@@ -246,20 +262,20 @@ fn panic(_info: &PanicInfo) -> ! {
 cargo build
 ```
 
-用 `rust-nm` 确认向量表在 `0x00000000`，reset_body 紧随其后：
+用 `rust-nm` 确认向量表在 `0x00000000`，reset_handler 紧随其后：
 
 ```bash
-rust-nm target/armv8r-none-eabihf/debug/rtos | grep -E "_vectors|reset_body|irq_handler|undef"
+rust-nm target/armv8r-none-eabihf/debug/rtos | grep -E "_vectors|reset_handler|irq_handler|undef"
 ```
 
 预期输出：
 
 ```text
 00000000 T _vectors
-00000020 T reset_body
+00000020 T reset_handler
 ```
 
-`_vectors` 在 `0x00000000`，`reset_body` 在 `0x00000020`（8 条向量 × 4 字节 = 32 字节 = 0x20）✓
+`_vectors` 在 `0x00000000`，`reset_handler` 在 `0x00000020`（8 条向量 × 4 字节 = 32 字节 = 0x20）✓
 
 QEMU 启动验证，输出和之前一致：
 
@@ -292,8 +308,8 @@ E: ARMv8-R 的向量表每个条目是一条 4 字节的 B 指令。CPU 发生�
 Q: 当 IRQ 中断发生时，Cortex-R52 会跳到哪个固定地址执行？
 - 0x00000000
 - 0x00000004
-+ 0x00000018
 - 由 GIC 动态决定
++ 0x00000018
 E: ARMv8-R 异常向量表从 0x00000000 开始，每个条目 4 字节，IRQ 是第 7 个条目（从 0 开始数第 6 个），偏移 = 6 × 4 = 0x18，所以 IRQ 向量在 0x00000018。
 ```
 
@@ -301,8 +317,8 @@ E: ARMv8-R 异常向量表从 0x00000000 开始，每个条目 4 字节，IRQ �
 Q: 向量表为什么要单独放在 .text.vector_table 段，而不是和 reset handler 合并在一起？
 - 因为汇编器不允许向量表和代码在同一个段
 - 因为向量表必须用不同的编译选项编译
-+ 因为向量表和初始化代码的职责不同，分离后便于链接脚本独立控制位置，也为后续向量表重定位到 RAM 做准备
 - 因为合并后代码体积会增大
++ 因为向量表和初始化代码的职责不同，分离后便于链接脚本独立控制位置，也为后续向量表重定位到 RAM 做准备
 E: 向量表是硬件依赖的固定地址结构，而 reset handler 是一次性执行的初始化代码，两者生命周期不同。分离后链接脚本可以精确控制各自的位置，RTOS 后续需要把向量表复制到 RAM（支持动态注册 IRQ handler）时改动最小。
 ```
 
