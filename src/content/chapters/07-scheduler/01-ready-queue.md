@@ -14,13 +14,13 @@ keywords: ["就绪队列", "Round-Robin", "优先级", "任务状态", "sleep_ti
 - 实现自动空闲任务（idle_entry + wfi）：所有任务睡眠时 CPU 不空转
 - 理解 `scheduler_tick` 中唤醒检查与立即抢占的顺序关系
 
-# 前置知识
+## 前置知识
 
-## 已完成的章节
+### 已完成的章节
 
 `07-scheduler/00-index.md` 已阅读，理解调度器整体设计。`06-context-switch` 的 `context_switch` 和 `start_first_task` 是本节基础。
 
-## 了解静态数组替代动态分配
+### 了解静态数组替代动态分配
 
 裸机无堆分配，所有数据结构必须编译期确定大小。本节用 `[Option<TaskEntry>; MAX_TASKS]` 代替 `Vec`。
 

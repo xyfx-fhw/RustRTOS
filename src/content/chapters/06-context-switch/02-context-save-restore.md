@@ -13,13 +13,13 @@ keywords: ["global_asm", "裸函数", "寄存器保存", "ABI", "context_switch"
 - 理解"被恢复"与"第一次启动"的区别，实现 `start_first_task`
 - 在 QEMU 上看到两个任务交替输出
 
-# 前置知识
+## 前置知识
 
-## 已完成的章节
+### 已完成的章节
 
 `06-context-switch/01-task-control-block.md` 已完成，`Task` 结构体和 `create_task` 已可编译，初始栈帧（14 个 u32 槽，lr = 入口函数地址）已正确构造。
 
-## ARM 调用约定（ABI）
+### ARM 调用约定（ABI）
 
 ARM AArch32 的 C 调用约定（AAPCS）规定：
 
@@ -30,7 +30,7 @@ ARM AArch32 的 C 调用约定（AAPCS）规定：
 
 `context_switch(curr, next)` 调用时，CPU 已经把 `curr` 放进 r0，把 `next` 放进 r1——汇编代码直接使用这两个寄存器即可，不需要额外声明。
 
-## push/pop 的寄存器顺序
+### push/pop 的寄存器顺序
 
 ARM 的 `PUSH {r0-r12, lr}` 遵循一条固定规则：**低编号寄存器存在低地址，高编号寄存器存在高地址**。因此：
 

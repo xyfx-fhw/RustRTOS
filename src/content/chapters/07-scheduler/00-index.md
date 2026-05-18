@@ -20,13 +20,13 @@ keywords: ["调度器", "抢占", "时间片", "Round-Robin", "SRSDB", "RFEIA", 
 | `01-ready-queue.md` | 调度器数据结构、Round-Robin 算法、任务状态、任务退出 |
 | `02-preemption.md` | 16 字 context frame、FIQ handler 改写、与调度器联动 |
 
-# 前置知识
+## 前置知识
 
-## 已完成的章节
+### 已完成的章节
 
 `06-context-switch` 已完成，`Task` 结构体、`create_task`、协作式 `context_switch` 均可用，两个任务可以手动轮换执行。
 
-## 了解 ARM 异常模式
+### 了解 ARM 异常模式
 
 AArch32 有多种处理器模式，每种模式有**独立的 SP 和 LR**（banked 寄存器）：
 

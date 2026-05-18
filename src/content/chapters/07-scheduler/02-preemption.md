@@ -13,13 +13,13 @@ keywords: ["SRSDB", "RFEIA", "FIQ handler", "真抢占", "优先级调度", "16�
 - 实现立即抢占：时间片到期 OR 更高优先级任务 Ready → FIQ 直接切换，任务不需要调用 yield
 - 在 QEMU 上验证：高优先级任务独占 CPU，退出后低优先级均分时间片
 
-# 前置知识
+## 前置知识
 
-## 已完成的章节
+### 已完成的章节
 
 `07-scheduler/01-ready-queue.md` 已完成，调度器数据结构与 Round-Robin 逻辑就绪，但上一节的 `fiq_handler` 只通过标志触发协作切换（需要任务主动调用 `yield_now`）。本节用 SRSDB 重写 `fiq_handler`，实现真正的硬件级抢占。
 
-## 两条关键 ARM 指令
+### 两条关键 ARM 指令
 
 ### SRSDB SP!, #mode（Store Return State, Decrement Before）
 
@@ -48,7 +48,7 @@ keywords: ["SRSDB", "RFEIA", "FIQ handler", "真抢占", "优先级调度", "16�
 
 原子地恢复 PC 和 CPSR，并正确处理模式切换，是异常返回的标准做法。
 
-## 16 字 Context Frame
+### 16 字 Context Frame
 
 ```text
 sp+0:  r0       ─┐
