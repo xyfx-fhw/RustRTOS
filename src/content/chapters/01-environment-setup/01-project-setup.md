@@ -85,9 +85,18 @@ rtos/
 └── Cargo.toml
 ```
 
+> **两个 TOML 文件，分工不同**
+>
+> | 文件 | 职责 | 类比 |
+> |---|---|---|
+> | `Cargo.toml` | **项目声明**：包名、版本、依赖、编译 profile | "这个项目是什么" |
+> | `.cargo/config.toml` | **构建环境**：默认目标架构、rustflags、build-std | "怎么去编译它" |
+>
+> `Cargo.toml` 随代码一起提交，控制项目本身的元数据；`.cargo/config.toml` 配置的是 Cargo 工具链层面的行为——比如"每次 `cargo build` 都默认针对 Cortex-R52 编译"，这属于工作区级别的开关，不放进项目包描述里。两者职责不重叠，所以需要两个文件。
+
 # 步骤三：配置 Cargo.toml
 
-打开项目根目录的 `Cargo.toml`，在文件末尾追加两个 profile 配置：
+打开项目根目录的 `Cargo.toml`，在文件末尾追加两个 profile 配置（用于优化代码体积）：
 
 ```toml
 [profile.dev]

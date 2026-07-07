@@ -30,31 +30,50 @@ keywords: ["reset handler", "汇编", "no_std", "no_main", "栈初始化", "BSS"
 
 ## 寄存器是什么
 
-寄存器是 CPU 内部的"临时变量格"。Cortex-R52 有 16 个通用寄存器，常用的是：
+寄存器是 CPU 内部速度最快的一小块存储单元，直接集成在处理器芯片里，访问它不需要经过总线或内存，延迟几乎为零。程序运行时所有的计算（加减乘除、比较、跳转）都必须先把数据搬到寄存器里才能操作——CPU 没有办法直接对内存里的数据做运算。
 
-| 寄存器 | 别名 | 用途 |
-| --- | --- | --- |
-| `r0`–`r3` | — | 通用临时变量，函数前四个参数也放这里 |
-| `r13` | `sp` | 栈指针（Stack Pointer），指向当前栈顶位置 |
-| `r14` | `lr` | 链接寄存器（Link Register），保存函数返回地址 |
-| `r15` | `pc` | 程序计数器（Program Counter），保存下一条指令地址 |
+寄存器分为两类：**通用寄存器**（存临时数据）和**特殊寄存器**（控制 CPU 行为，比如状态标志位）。这里我们先关心通用寄存器和几个有特殊用途的别名。
 
-类比：把 CPU 想象成一个工人，寄存器就是他桌上摆的几个便利贴，每次只能记几个数字，用完随时可以覆盖。
+> **为什么写 Rust 还要了解寄存器？** 正常情况下完全不需要——编译器会自动分配寄存器，你感知不到它们的存在。但我们需要手写一些汇编代码（reset handler），而汇编是直接操作寄存器的。为了理解汇编代码的含义，必须知道寄存器的作用。
+
+Cortex-R52 有 16 个通用寄存器（r0–r15），其中 r0–r12 完全由程序指令控制，r13–r15 虽然程序也能读写，但 CPU 硬件会自动维护它们，因此有固定别名和约定用途。本章会直接用到 **r0–r3**、**sp**、**lr**、**pc**：
+
+| 寄存器 | 别名 | 由谁操作 | 用途 |
+| --- | --- | --- | --- |
+| `r0` | — | 程序 | 通用临时变量；函数第 1 个参数 / 返回值 |
+| `r1` | — | 程序 | 通用临时变量；函数第 2 个参数 |
+| `r2` | — | 程序 | 通用临时变量；函数第 3 个参数 |
+| `r3` | — | 程序 | 通用临时变量；函数第 4 个参数 |
+| `r4`–`r11` | — | 程序 | 通用变量；调用者需要保存后才能使用 |
+| `r12` | `ip` | 程序 | 临时寄存器（Intra-Procedure scratch），编译器内部临时用 |
+| `r13` | `sp` | 程序 + CPU | 栈指针（Stack Pointer）；`push`/`pop` 时 CPU 自动更新 |
+| `r14` | `lr` | 程序 + CPU | 链接寄存器（Link Register）；执行 `bl` 时 CPU 自动写入返回地址 |
+| `r15` | `pc` | 程序 + CPU | 程序计数器（Program Counter）；每执行一条指令 CPU 自动 +4 |
+
+类比：把 CPU 想象成一个工人，r0–r12 是他桌上可以随意涂改的便利贴，sp/lr/pc 则是三张有特殊格式的便利贴——工人自己也会维护它们，你轻易别乱动。
 
 ## 常用指令速查
 
-| 指令 | 含义 | 对应的 C 语言概念 |
-| --- | --- | --- |
-| `ldr r0, =VALUE` | 把较大的立即数或符号地址装入 r0 | `r0 = &VALUE;` （或 `r0 = VALUE;`） |
-| `mov r0, #4` | 把较小的数字 4 装入 r0 | `r0 = 4;` |
-| `str r0, [r1]` | 把 r0 的值写入 r1 指向的内存地址 | `*r1 = r0;` |
-| `ldr r0, [r1]` | 从 r1 指向的内存地址读取值装入 r0 | `r0 = *r1;` |
-| `add r0, r0, #4` | r0 = r0 + 4 | `r0 += 4;` |
-| `cmp r0, r1` | 比较 r0 和 r1，结果更新状态标志位 | 供后面的 if 判断使用，如比较两者大小 |
-| `bhs LABEL` | 如果（上一条比较无符号）≥，跳转到 LABEL | `if (r0 >= r1) goto LABEL;` |
-| `b LABEL` | 无条件跳转到 LABEL | `goto LABEL;` |
-| `bl LABEL` | 跳转到 LABEL，同时把返回地址存入 lr | `LABEL();` （带返回机制的函数调用） |
-| `wfi` | Wait For Interrupt，让 CPU 进入等待 | 休眠指令，如 `SLEEP();` |
+| 指令 | 全称 | 含义 | 对应的 C 语言概念 |
+| --- | --- | --- | --- |
+| `ldr r0, =VALUE` | Load Register | 伪指令，可加载任意 32 位值或符号地址 | `r0 = &VALUE;` （或 `r0 = VALUE;`） |
+| `mov r0, #4` | Move | 直接编码进指令的立即数赋值，只能用受限的值 | `r0 = 4;` |
+| `str r0, [r1]` | Store Register | 把 r0 的值写入 r1 指向的内存地址 | `*r1 = r0;` |
+| `ldr r0, [r1]` | Load Register | 从 r1 指向的内存地址读取值装入 r0 | `r0 = *r1;` |
+| `add r0, r0, #4` | Add | r0 = r0 + 4 | `r0 += 4;` |
+| `cmp r0, r1` | Compare | 比较 r0 和 r1，结果更新状态标志位 | 供后面的 if 判断使用，如比较两者大小 |
+| `bhs LABEL` | Branch if Higher or Same | 如果（上一条比较无符号）≥，跳转到 LABEL | `if (r0 >= r1) goto LABEL;` |
+| `b LABEL` | Branch | 无条件跳转到 LABEL | `goto LABEL;` |
+| `bl LABEL` | Branch with Link | 跳转到 LABEL，同时把返回地址存入 lr | `LABEL();` （带返回机制的函数调用） |
+| `wfi` | Wait For Interrupt | 让 CPU 进入低功耗等待状态 | 休眠指令，如 `SLEEP();` |
+
+> **`mov` 和 `ldr =` 有什么区别？**
+>
+> 每条 ARM32 指令本身只有 32 位宽，除了操作码之外，留给"立即数"的编码空间非常有限（大约只有 12 位）。这意味着 `mov` 能直接写进指令的数值是有限制的，只有满足特定编码规则的值才合法（比如 `0`、`4`、`255`、`0x100` 可以，而 `0x10000000` 这样的地址几乎都不行）。
+>
+> `ldr r0, =VALUE` 则是一条**伪指令**——汇编器看到它时会做两件事：① 把那个 32 位值存到代码附近一块叫"字面量池（Literal Pool）"的内存里；② 生成一条真实的 `ldr`，用 PC 相对寻址去读这个值。最终能加载任意 32 位数或符号地址，没有限制。
+>
+> 简单记：**写死的小数字用 `mov`，地址或不确定能不能编码的数值用 `ldr =`**。
 
 ## 数字标签与跳转
 
@@ -83,17 +102,16 @@ keywords: ["reset handler", "汇编", "no_std", "no_main", "栈初始化", "BSS"
 ### 声明并安放汇编入口点
 
 每一段汇编代码都需要告诉汇编器它应该被放到哪里，以及是否允许外部调用。
-在刚开始时，我们要先写下这三行：
+在刚开始时，我们要先写下这两行：
 
 ```asm
     // 放在 .text.reset_handler 节，链接脚本会把它放到 0x00000000
-    .section .text.reset_handler, “ax”
+    .section .text.reset_handler, "ax"
     .global reset_handler
-reset_handler:
 ```
-- **`.section .text.reset_handler, “ax”`**：这是一句编译指令（Directive）。它告诉汇编器把接下来的代码放到名叫 `.text.reset_handler` 的特殊段（Section）里。末尾的 `”ax”` 表示这段内存应当分配且具有可执行权限（Allocatable & Executable）。我们在上一节链接脚本里写过，把 `.text.reset_handler` 固定在 `0x00000000` 首地址，这句指令就完美地跟链接脚本配合在了一起。
+
+- **`.section .text.reset_handler, "ax"`**：这是一句编译指令（Directive）。它告诉汇编器把接下来的代码放到名叫 `.text.reset_handler` 的特殊段（Section）里。末尾的 `"ax"` 表示这段内存应当分配且具有可执行权限（Allocatable & Executable）。我们在上一节链接脚本里写过，把 `.text.reset_handler` 固定在 `0x00000000` 首地址，这句指令就完美地跟链接脚本配合在了一起。
 - **`.global reset_handler`**：将 `reset_handler` 这个标签暴露成全局符号。这相当于在一个 C 文件里写非 `static` 函数，其他文件也能”看到”它。
-- **`reset_handler:`**：标志这段代码在这里真正开始。
 
 ---
 
@@ -106,7 +124,7 @@ reset_handler:
 > - **HYP (Hypervisor)**：虚拟化管理模式，权限比 SVC 还高，用于在一颗物理芯片上同时跑多个独立操作系统（虚拟机管理）。
 >
 > **为什么要做切换？**
-> 实践中发现，Cortex-R52 在 mps3-an536 刚上电时，由于它本身支持虚拟化，所以直接以权限最高的 **HYP 模式（0x1A）** 启动。但这会带来严重问题：由于我们的目标是写一个简单的单系统内核（在 SVC 模式下），如果在运行中发生硬件中断（FIQ/IRQ），从 HYP 模式触发中断的 LR（链接寄存器）计算规则，跟从 SVC 模式触发的规则是不一样的。如果不退回到 SVC 模式，以后中断发生后执行返回指令会导致跳到错误地址甚至死机。
+> Cortex-R52 在 mps3-an536 刚上电时，由于它本身支持虚拟化，所以直接以权限最高的 **HYP 模式（0x1A）** 启动。但由于我们只是编写一个简单的 RTOS，没有虚拟化需求，所以我们希望把 CPU 切换到 **SVC 模式（0x13）**，以便后续的操作系统内核代码能正常访问外设寄存器。
 
 解决方案是在启动最开头检测是否处于 HYP 模式，如果是，主动“降级”并立刻用 `eret` 切换到 SVC 模式：
 
@@ -116,7 +134,7 @@ reset_handler:
     mrs r0, cpsr
     and r0, r0, #0x1f      @ 取出 CPSR.M（模式位）
     cmp r0, #0x1a          @ 0x1a = HYP 模式
-    bne .Lnormal_init      @ 不是 HYP，跳过切换
+    bne .Lnormal_init      @ 不是 HYP，跳过切换，跳转到 .Lnormal_init（接下来会讲到）
 
     @ 在 HYP 模式：设置 SPSR_hyp = SVC + I+F 禁用，然后 ERET
     mov r0, #0xd3          @ SVC 模式（AArch32 EL1）| I=1 | F=1
@@ -124,73 +142,151 @@ reset_handler:
     adr r0, .Lnormal_init  @ 切换后的入口地址
     msr elr_hyp, r0
     eret                   @ 切换到 SVC 模式
+```
 
+- **`reset_handler:`**：标志这段代码在这里真正开始。也就是上面通过`.global reset_handler`暴露的全局符号。注意`.global reset_handler`和`text.reset_handler`里都有`reset_handler`，但是作用不同，前者是”函数符号”，后者是”内存布局”。
+- **`.L` 前缀的含义**：`.Lnormal_init` 中的 `.L` 是 GNU 汇编器的局部标签约定——带 `.L` 的标签不会出现在最终的符号表里，链接器和调试器都看不到它，只是文件内部的跳转锚点。`reset_handler` 没有 `.L` 前缀，加上 `.global` 后才能被链接器识别为全局入口。
+
+**先理解整体逻辑再看每行：**
+
+在 HYP 模式下，CPU **不允许**用 `msr cpsr, r0` 直接改写 CPSR 来降级——这是 ARM 的安全限制。`eret`（Exception Return）是**唯一能退出 HYP 模式的指令**，它执行时会原子地做两件事：① 把 `spsr_hyp` 的值写入 CPSR（决定切换后的模式）；② 把 `elr_hyp` 的值写入 PC（决定切换后跳到哪里执行）。
+
+因此整个逻辑是：**先把”目标模式”填进 `spsr_hyp`，把”目标地址”填进 `elr_hyp`，然后 `eret` 一步到位完成切换**。前面五行都是在为这两个寄存器”填表”：
+
+- **`mrs r0, cpsr`**：把 `cpsr`（Current Program Status Register，当前程序状态寄存器）读入 `r0`，它记录了 CPU 当前的运行模式等标志位。
+- **`and r0, r0, #0x1f`**：按位与，`0x1f`=`0b00011111`，保留 `cpsr` 的低 5 位（模式字段），其余位清零。
+- **`cmp r0, #0x1a`**：对比模式编号是否等于 `0x1a`（HYP），结果写入状态标志位。
+- **`bne .Lnormal_init`**：`bne`（Branch if Not Equal）——不是 HYP 模式就直接跳过切换，进入正常初始化。
+- **`mov r0, #0xd3`**：构造目标 CPSR 值：`0xd3` = SVC 模式（`0x13`）| `I=1`（禁 IRQ）| `F=1`（禁 FIQ）。
+- **`msr spsr_cxsf, r0`**：把构造好的目标模式写入 `spsr_hyp`（`cxsf` 是字段掩码，表示写入全部字段）。`eret` 会把它恢复成 CPSR。
+- **`adr r0, .Lnormal_init`**：把标签 `.Lnormal_init` 的地址装入 `r0`，即切换后要跳到的位置。
+- **`msr elr_hyp, r0`**：把目标地址写入 `elr_hyp`。`eret` 会把它装入 PC。
+- **`eret`**：原子执行——`spsr_hyp` → CPSR（切换到 SVC 模式），`elr_hyp` → PC（跳到 `.Lnormal_init`），模式切换完成。
+
+### 初始化栈、清零 BSS、复制 .data、跳转 Rust
+
+完整的后半段代码如下（`.Lnormal_init:` 是内部跳转锚点，加 `.L` 前缀使其不进符号表；后面的数字标签 `1:`/`2:` 则是 GNU 汇编器内置的永远局部的标签类型，天生不会进符号表，无需任何前缀）：
+
+```asm
 .Lnormal_init:
-```
+    @ 1. 设置栈指针
+    ldr sp, =_stack_start
 
-### 设置栈指针
-
-CPU 上电时 `sp` 寄存器的值是不确定的。我们要把它指向前面链接脚本里定义的 `_stack_start`（即 BRAM 的末尾）：
-
-```asm
-ldr sp, =_stack_start
-```
-
-### 清零 BSS 段
-
-`.bss` 段存放初始值为零的全局变量。硬件上电时 RAM 的内容是随机的，所以我们必须写一个循环来手动清零这段内存（从 `_sbss` 写到 `_ebss`）：
-
-```asm
-    ldr r0, =_sbss      @ r0 = 当前写入位置
-    ldr r1, =_ebss      @ r1 = 结束位置
-    mov r2, #0          @ r2 = 写 0
-
+    @ 2. 清零 BSS 段
+    ldr r0, =_sbss
+    ldr r1, =_ebss
+    mov r2, #0
 1:
-    cmp r0, r1          @ 是否写完？
+    cmp r0, r1
     bhs 2f
     str r2, [r0]
-    add r0, r0, #4      @ 指针后移 4 字节
-    b 1b                @ 循环
+    add r0, r0, #4
+    b 1b
+2:
+    @ 3. 复制 .data 段从 Flash 到 RAM
+    ldr r0, =_sdata
+    ldr r1, =_edata
+    ldr r2, =_sidata
+3:
+    cmp r0, r1
+    bhs 4f
+    ldr r3, [r2]
+    str r3, [r0]
+    add r0, r0, #4
+    add r2, r2, #4
+    b 3b
+4:
+    @ 4. 跳转到 Rust 入口
+    bl rust_main
+5:
+    wfi
+    b 5b
+```
+
+逐段说明：
+
+#### 设置栈指针
+
+CPU 上电时 `sp` 的值不确定，必须先把它设好，后续的函数调用才能正常压栈出栈。`_stack_start` 是链接脚本里定义的 RAM 末尾地址（`0x10080000`），栈从高地址向低地址增长。
+
+`.bss` 存放初始值为零的全局变量。RAM 上电内容随机，必须手动把这段内存清零。
+
+```asm
+    @ 2. 清零 BSS 段
+    ldr r0, =_sbss
+    ldr r1, =_ebss
+    mov r2, #0
+1:
+    cmp r0, r1
+    bhs 2f
+    str r2, [r0]
+    add r0, r0, #4
+    b 1b
 2:
 ```
 
-> **语法小提示：什么是 `1:`, `2:`, `b 1b`, `bhs 2f`？**
-> 这是 GNU 汇编器里的**局部数字标签（Local Labels）**语法。
-> - `1:` 和 `2:` 定义了代码里的锚点位置。
-> - `b 1b` 中的 `b` 代表 **backward（向后/向上）**，意思是“跳转到上方离我最近的 `1` 标签处”，用来实现循环（继续清零）。
-> - `bhs 2f` 中的 `f` 代表 **forward（向前/向下）**，意思是“跳转到下方离我最近的 `2` 标签处”，用来跳出循环。
-> 这种写法的最大好处是不用给每个小循环费尽心思起局部名字（如 `loop_start`, `loop_end`），让代码极其简洁。
+逐行说明：
 
-### 复制 .data 段（Flash -> RAM）
+- **`ldr r0, =_sbss`**：把链接脚本里的 `_sbss`（BSS 段起始地址）装入 `r0`，作为"当前写入指针"。
+- **`ldr r1, =_ebss`**：把 `_ebss`（BSS 段结束地址）装入 `r1`，作为循环终止条件。
+- **`mov r2, #0`**：`r2` 固定存 `0`，每次用它写入内存。
+- **`1:`**：循环入口标签。
+- **`cmp r0, r1`**：比较当前指针和终止地址，结果存入状态标志位（不改变 r0/r1）。
+- **`bhs 2f`**：`r0 >= r1` 时跳到标签 `2:`，退出循环（已写完）。
+- **`str r2, [r0]`**：把 `r2`（值为 0）写入 `r0` 指向的内存地址。
+- **`add r0, r0, #4`**：指针后移 4 字节，指向下一个待清零的位置。
+- **`b 1b`**：无条件跳回标签 `1:`，继续循环。
+- **`2:`**：循环出口标签，清零完成后继续执行后面的代码。
 
-`.data` 段存有初始值的全局变量。初始值永久保存在 Flash（`_sidata`），但运行时必须把它们搬到 RAM（`_sdata` 到 `_edata`）里供 CPU 读写：
+> **语法小提示：`1:` / `2:` / `b 1b` / `bhs 2f`**
+> 这是 GNU 汇编的**局部数字标签**语法：`b`=backward（跳到上方最近的该标签），`f`=forward（跳到下方最近的该标签），省去给每个小循环起名的麻烦。
+
+用伪代码翻译成你熟悉的语言大概是这样：
+
+```text
+r0 = _sbss   // 当前写入地址，从 BSS 起始开始
+r1 = _ebss   // 终止地址
+r2 = 0       // 要写入的值
+
+while r0 < r1:
+    *r0 = 0      // 向 r0 指向的地址写 0
+    r0 += 4      // 指针后移 4 字节（一个 u32 的大小）
+```
+
+#### 复制 .data 段（Flash → RAM）
 
 ```asm
-    ldr r0, =_sdata     @ 目标起始
-    ldr r1, =_edata     @ 目标结束
-    ldr r2, =_sidata    @ 来源起始
-
+2:
+    @ 3. 复制 .data 段从 Flash 到 RAM
+    ldr r0, =_sdata
+    ldr r1, =_edata
+    ldr r2, =_sidata
 3:
-    cmp r0, r1          @ 是否搬完？
+    cmp r0, r1
     bhs 4f
-    ldr r3, [r2]        @ 读一字
-    str r3, [r0]        @ 写一字
+    ldr r3, [r2]
+    str r3, [r0]
     add r0, r0, #4
     add r2, r2, #4
     b 3b
 4:
 ```
 
-### 跳转到 Rust 业务代码
+有初始值的全局变量（如 `static mut X: u32 = 42`）的初始值存在 Flash（`_sidata`），但运行时必须在 RAM 里读写。用 `r2` 从 Flash 逐字读、`r0` 逐字写到 RAM，直到 `r0 >= r1`（即 `_edata`）为止。
 
-万事俱备，最后把执行权交给真正的 Rust 主函数 `rust_main`，并留一个“进入低功耗”的死循环作为最后的后备防线：
+#### 跳转到 Rust
 
 ```asm
-    bl rust_main        @ 调用 rust_main
+4:
+    @ 4. 跳转到 Rust 入口
+    bl rust_main
 5:
-    wfi                 @ CPU 睡眠
-    b 5b                @ 死循环保底
+    wfi
+    b 5b
 ```
+
+`bl rust_main` 把控制权交给 Rust。`rust_main` 正常情况下不会返回（它的返回类型是 `!`），但后面的 `wfi` + 死循环是保底防线——万一意外返回，CPU 进入低功耗等待，不会乱跑。
+
 
 ## 第二部分：编写完整的 src/main.rs
 
@@ -206,43 +302,43 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 global_asm!(r#"
-    // 放在 .text.reset_handler 节，链接脚本会把它放到 0x00000000
+    @ 放在 .text.reset_handler 节，链接脚本会把它放到 0x00000000
     .section .text.reset_handler, "ax"
     .global reset_handler
-    reset_handler:
+reset_handler:
 
-    // 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
+    @ 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
     mrs r0, cpsr
     and r0, r0, #0x1f
     cmp r0, #0x1a
     bne .Lnormal_init
     mov r0, #0xd3
-    msr spsr_cxsf, r0      // SVC 模式（AArch32 EL1），禁 IRQ/FIQ
+    msr spsr_cxsf, r0      @ SVC 模式（AArch32 EL1），禁 IRQ/FIQ
     adr r0, .Lnormal_init
     msr elr_hyp, r0
     eret
-    .Lnormal_init:
+.Lnormal_init:
 
-    // 1. 设置栈指针
+    @ 1. 设置栈指针
     ldr sp, =_stack_start
 
-    // 2. 清零 BSS 段
+    @ 2. 清零 BSS 段
     ldr r0, =_sbss
     ldr r1, =_ebss
     mov r2, #0
-    1:
+1:
     cmp r0, r1
     bhs 2f
     str r2, [r0]
     add r0, r0, #4
     b 1b
-    2:
+2:
 
-    // 3. 复制 .data 段从 Flash 到 RAM
+    @ 3. 复制 .data 段从 Flash 到 RAM
     ldr r0, =_sdata
     ldr r1, =_edata
     ldr r2, =_sidata
-    3:
+3:
     cmp r0, r1
     bhs 4f
     ldr r3, [r2]
@@ -250,13 +346,13 @@ global_asm!(r#"
     add r0, r0, #4
     add r2, r2, #4
     b 3b
-    4:
+4:
 
-    // 4. 跳转到 Rust 入口
+    @ 4. 跳转到 Rust 入口
     bl rust_main
 
-    // 安全保底死循环
-    5:
+    @ 安全保底死循环
+5:
     wfi
     b 5b
 "#);
@@ -334,7 +430,7 @@ qemu-system-arm \
   -device loader,file=target/armv8r-none-eabihf/debug/rtos
 ```
 
-程序会进入 `loop {}`，QEMU 保持运行不退出、不报错。用 **Ctrl+A 然后按 X** 退出 QEMU。
+程序会进入 `loop {}`，QEMU 保持运行不退出、不报错。用 **Ctrl+A 然后按 X（Ctrl+A 后可能没有反应，没关系继续按 X）** 退出 QEMU。
 
 > **注意：** 目前没有任何输出，屏幕一片空白是正常的——我们还没有实现 UART 驱动。下一章会在 `rust_main` 里加上串口输出，届时就能看到程序实际在跑了。
 

@@ -15,7 +15,7 @@ global_asm!(r#"
     .section .text.vector_table, ax
     .global _vectors
     _vectors:
-    b reset_body
+    b reset_handler
     b undef_handler
     b svc_handler
     b prefetch_handler
@@ -70,8 +70,8 @@ global_asm!(r#"
 
     // Reset handler
     .section .text.reset_handler, ax
-    .global reset_body
-    reset_body:
+    .global reset_handler
+    reset_handler:
     // mps3-an536 以 HYP 模式启动，需切换到 SVC 模式才能使用普通向量表
     mrs r0, cpsr
     and r0, r0, #0x1f

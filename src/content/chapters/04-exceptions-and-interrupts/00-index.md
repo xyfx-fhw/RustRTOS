@@ -28,15 +28,7 @@ keywords: ["异常", "向量表", "vector table", "IRQ", "FIQ", "ARMv8-R", "Cort
 
 异常是处理器停下当前工作、转去处理特殊事件的机制。可以把 CPU 想象成一个一直在执行代码的工人——异常就是打断这个工人的各种突发情况，有的来自外部（比如定时器到点了），有的来自代码自身（比如执行了非法指令）。
 
-中断（Interrupt）是异常的一种子类型，专指来自外部硬件的信号（如定时器、UART 接收到数据、按下按钮）。
-
-处理器收到异常后，会：
-
-1. 保存当前执行状态（把 PC、CPSR 等寄存器压栈）
-2. 跳转到对应的**异常处理函数**
-3. 处理完后恢复现场，继续执行被打断的代码
-
-# ARMv8-R 的 8 种异常
+## ARMv8-R 的 8 种异常
 
 Cortex-R52 在 AArch32 状态下支持以下 8 种异常，每种都有固定的触发条件：
 
@@ -51,7 +43,19 @@ Cortex-R52 在 AArch32 状态下支持以下 8 种异常，每种都有固定的
 | 7 | **IRQ** | 普通外部中断，来自 GIC 分发的硬件信号 |
 | 8 | **FIQ** | 快速中断，优先级高于 IRQ，延迟更低 |
 
-其中 1–6 是同步异常（执行到某条指令时发生），7–8 是异步中断（随时可能来）。
+> **Reset 异常你已经见过了**：我们从第二章开始一直在写的 `reset_handler` 就是 Reset 异常的处理函数——CPU 上电/复位时触发这个异常，硬件把 PC 指向 `0x00000000`，我们放在那里的代码就开始跑了。
+
+**同步**异常（1–6）在执行到某条具体指令时确定性地发生，CPU 知道是哪条指令触发的；**异步**中断（7–8）由外部硬件随时发出，与当前执行的指令无关。
+
+处理器收到异常后的通用流程是：
+
+1. 保存当前执行状态（把 PC、CPSR 等寄存器存入对应模式的影子寄存器）
+2. 跳转到对应的**异常处理函数**
+3. **如果可以恢复**：处理完后还原现场，继续执行被打断的代码
+
+但"第 3 步"并不总是发生：Reset 从不返回（它直接重启系统）；Data Abort 和 Undefined Instruction 遇到无法修复的错误时，操作系统通常会终止出错的任务或者直接 panic，而不是继续跑。
+
+> 中断（Interrupt）是异常的一种子类型，专指来自外部硬件的信号（如定时器、UART 接收到数据、按下按钮）。
 
 # 向量表：ARMv8-R vs Cortex-M
 
@@ -130,29 +134,36 @@ SECTIONS
 
 ```rust
 global_asm!(r#"
-    // ── 向量表：8 条 B 指令，必须在 0x00000000 ──
+    @ ── 向量表：8 条 B 指令，必须在 0x00000000 ──
     .section .text.vector_table, "ax"
     .global _vectors
-    _vectors:
-    b reset_handler      // 0x00  Reset
-    b undef_handler      // 0x04  Undefined Instruction
-    b svc_handler        // 0x08  SVC
-    b prefetch_handler   // 0x0C  Prefetch Abort
-    b data_handler       // 0x10  Data Abort
-    b hang               // 0x14  HVC（暂不用）
-    b irq_handler        // 0x18  IRQ  ← 下一章实现
-    b fiq_handler        // 0x1C  FIQ
+_vectors:
+    b reset_handler      @ 0x00  Reset
+    b undef_handler      @ 0x04  Undefined Instruction
+    b svc_handler        @ 0x08  SVC
+    b prefetch_handler   @ 0x0C  Prefetch Abort
+    b data_handler       @ 0x10  Data Abort
+    b hang               @ 0x14  HVC（暂不用）
+    b irq_handler        @ 0x18  IRQ  ← 下一章实现
+    b fiq_handler        @ 0x1C  FIQ
 
-    // ── 异常处理桩：尚未实现的异常全部挂起 CPU ──
+    @ ── 异常处理桩：尚未实现的异常全部挂起 CPU ──
     .section .text.handlers, "ax"
-    undef_handler:       b undef_handler
-    svc_handler:         b svc_handler
-    prefetch_handler:    b prefetch_handler
-    data_handler:        b data_handler
-    hang:                wfi
-                         b hang
-    irq_handler:         b irq_handler      // 下一章替换
-    fiq_handler:         b fiq_handler
+undef_handler:
+    b undef_handler
+svc_handler:
+    b svc_handler
+prefetch_handler:
+    b prefetch_handler
+data_handler:
+    b data_handler
+hang:
+    wfi
+    b hang
+irq_handler:
+    b irq_handler      @ 下一章替换
+fiq_handler:
+    b fiq_handler
 "#);
 ```
 
@@ -175,10 +186,10 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 global_asm!(r#"
-    // 向量表
+    @ 向量表
     .section .text.vector_table, "ax"
     .global _vectors
-    _vectors:
+_vectors:
     b reset_handler
     b undef_handler
     b svc_handler
@@ -188,22 +199,29 @@ global_asm!(r#"
     b irq_handler
     b fiq_handler
 
-    // 异常处理桩
+    @ 异常处理桩
     .section .text.handlers, "ax"
-    undef_handler:       b undef_handler
-    svc_handler:         b svc_handler
-    prefetch_handler:    b prefetch_handler
-    data_handler:        b data_handler
-    hang:                wfi
-                         b hang
-    irq_handler:         b irq_handler
-    fiq_handler:         b fiq_handler
+undef_handler:
+    b undef_handler
+svc_handler:
+    b svc_handler
+prefetch_handler:
+    b prefetch_handler
+data_handler:
+    b data_handler
+hang:
+    wfi
+    b hang
+irq_handler:
+    b irq_handler
+fiq_handler:
+    b fiq_handler
 
-    // Reset handler（初始化代码）
+    @ Reset handler（初始化代码）
     .section .text.reset_handler, "ax"
     .global reset_handler
-    reset_handler:
-    // 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
+reset_handler:
+    @ 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
     mrs r0, cpsr
     and r0, r0, #0x1f
     cmp r0, #0x1a
@@ -212,33 +230,38 @@ global_asm!(r#"
     msr spsr_cxsf, r0
     adr r0, .Lnormal_init
     msr elr_hyp, r0
-    eret                    // 切换到 SVC 模式（AArch32 EL1），跳到 .Lnormal_init
-    .Lnormal_init:
-    // 1. 设置栈指针
+    eret                    @ 切换到 SVC 模式（AArch32 EL1），跳到 .Lnormal_init
+.Lnormal_init:
+    @ 1. 设置栈指针
     ldr sp, =_stack_start
     ldr r0, =_sbss
     ldr r1, =_ebss
     mov r2, #0
-    1: cmp r0, r1
-       bhs 2f
-       str r2, [r0]
-       add r0, r0, #4
-       b 1b
-    2:
+1:
+    cmp r0, r1
+    bhs 2f
+    str r2, [r0]
+    add r0, r0, #4
+    b 1b
+2:
     ldr r0, =_sdata
     ldr r1, =_edata
     ldr r2, =_sidata
-    3: cmp r0, r1
-       bhs 4f
-       ldr r3, [r2]
-       str r3, [r0]
-       add r0, r0, #4
-       add r2, r2, #4
-       b 3b
-    4:
+3:
+    cmp r0, r1
+    bhs 4f
+    ldr r3, [r2]
+    str r3, [r0]
+    add r0, r0, #4
+    add r2, r2, #4
+    b 3b
+4:
     bl rust_main
-    5: wfi
-       b 5b
+
+    @ 安全保底死循环
+5:
+    wfi
+    b 5b
 "#);
 
 #[unsafe(no_mangle)]
