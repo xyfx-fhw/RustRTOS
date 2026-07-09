@@ -1,8 +1,8 @@
 ---
 title: "就绪队列与调度器核心"
 description: "实现优先级 Round-Robin 调度器：任务状态机、优先级选择、sleep_ticks 真睡眠与空闲任务"
-difficulty: intermediate
-estimatedTime: 50
+difficulty: advanced
+estimatedTime: 60
 keywords: ["就绪队列", "Round-Robin", "优先级", "任务状态", "sleep_ticks", "Sleeping", "空闲任务", "Zombie"]
 ---
 
