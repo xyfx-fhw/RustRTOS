@@ -46,7 +46,7 @@ ARM 的 `PUSH {r0-r12, lr}` 遵循一条固定规则：**低编号寄存器存�
 
 `pop {r0-r12, lr}` 是完全对称的逆操作，按相同顺序从低地址往高地址读回。这条规则决定了 `create_task` 里初始帧的构造方式，两者必须严格一致。
 
-# context_switch 的设计思路
+# context_switch
 
 ## push 之后 r0 还有效吗？
 
@@ -57,29 +57,62 @@ ARM 的 `PUSH {r0-r12, lr}` 遵循一条固定规则：**低编号寄存器存�
 假设任务 A 正在运行，调用 `context_switch(&TASK_A, &TASK_B)`：
 
 ```text
-调用前：r0 = &TASK_A，r1 = &TASK_B（ABI 保证）
+调用前（ABI 保证）：r0 = &TASK_A，r1 = &TASK_B
+
+─── 保存任务 A ───────────────────────────────
 
 ① push {r0-r12, lr}
-   → 14 个寄存器压入任务 A 的私有栈
-   → sp 下移 56 字节（r0 寄存器值不变，仍 = &TASK_A）
+   将 14 个寄存器的当前值依次压入任务 A 的私有栈。
+   sp 向低地址移动 56 字节（14 × 4）。
+   push 只把寄存器值复制到内存，r0 本身不变，仍 = &TASK_A。
 
 ② str sp, [r0]
-   → TASK_A.stack_ptr = 当前 sp（A 的帧底地址，r0 的位置）
+   str = store，把 sp 的值写到 r0 所指的内存地址。
+   r0 = &TASK_A，[r0] 就是 TASK_A 的第一个字段 stack_ptr（#[repr(C)]，偏移 0）。
+   执行后：TASK_A.stack_ptr = sp  ← 记住 A 被暂停时的栈顶
+
+─── 切换栈 ──────────────────────────────────
 
 ③ ldr sp, [r1]
-   → sp = TASK_B.stack_ptr（切换到任务 B 的栈）
+   ldr = load，从 r1 所指的内存地址读一个 32 位值装进 sp。
+   r1 = &TASK_B，[r1] 就是 TASK_B.stack_ptr。
+   执行后：sp = TASK_B.stack_ptr  ← sp 切换到 B 的私有栈
+
+─── 恢复任务 B ───────────────────────────────
 
 ④ pop {r0-r12, lr}
-   → 从任务 B 的栈上恢复 r0-r12 和 lr
-   → （第一次恢复 B 时，lr = B 的入口函数地址）
+   此时 sp 指向任务 B 的寄存器帧，pop 把帧里的值依次装回 r0-r12 和 lr。
+   第一次切换到 B 时，帧由 create_task 构造：r0-r12 = 0，lr = task_b_fn 地址。
 
 ⑤ bx lr
-   → 跳到 lr 保存的地址，任务 B 开始/继续执行
+   跳到 lr 保存的地址，任务 B 开始（或继续）执行。
 ```
 
 当任务 B 之后调用 `context_switch(&TASK_B, &TASK_A)` 时，流程完全对称——A 的 lr 被恢复，`bx lr` 跳回 A 调用 `context_switch` 时的返回地址，A 就从那行代码之后继续执行，就好像 `context_switch` 正常返回了一样。
 
-# 用 global_asm! 实现 context_switch
+## 启动第一个任务
+
+`start_first_task` 与 `context_switch` 的关键区别：
+
+- `context_switch`：先**保存**当前任务，再**恢复**下一任务
+- `start_first_task`：直接**恢复**目标任务，**不保存**当前上下文（`rust_main` 到这里就"牺牲"了，之后任务之间只用 `context_switch` 互相切换）
+
+```text
+调用 start_first_task(&TASK_A)：
+
+r0 = &TASK_A
+
+① ldr sp, [r0]
+   → sp = TASK_A.stack_ptr（指向初始帧的 r0 位置）
+
+② pop {r0-r12, lr}
+   → r0-r12 = 0，lr = task_a_fn（入口函数地址）
+
+③ bx lr
+   → 跳到 task_a_fn，任务 A 开始执行
+```
+
+## 用 global_asm! 实现
 
 `global_asm!` 把汇编直接嵌入编译单元，不受 Rust 借用检查或寄存器分配的干扰——这正是 context switch 所需要的。
 
@@ -94,7 +127,7 @@ global_asm!(r#"
     // r1 = next（指向下一任务 TCB 的指针）
     .global context_switch
     .type   context_switch, %function
-    context_switch:
+context_switch:
     push {{r0-r12, lr}}",   // ① 保存当前任务的寄存器到其私有栈
     str  sp, [r0]",         // ② curr->stack_ptr = sp（更新 TCB）
     ldr  sp, [r1]",         // ③ sp = next->stack_ptr（切换到下一任务的栈）
@@ -106,7 +139,7 @@ global_asm!(r#"
     // 注意：此函数永不返回
     .global start_first_task
     .type   start_first_task, %function
-    start_first_task:
+start_first_task:
     ldr  sp, [r0]",         // sp = task->stack_ptr（加载初始栈帧地址）
     pop  {{r0-r12, lr}}",   // 从初始帧恢复所有寄存器（lr = 入口函数地址）
     bx   lr",               // 跳到入口函数，第一个任务开始运行
@@ -128,28 +161,6 @@ unsafe extern "C" {
 `unsafe extern "C"` 块告诉 Rust：这些函数在别处（汇编里）用 C 调用约定实现，且调用它们是 unsafe 的（Rust 2024 要求外部块必须标记 `unsafe`）。`-> !` 告诉 Rust `start_first_task` 永不返回，满足 `rust_main -> !` 的类型要求。
 
 > **注意：** `global_asm!` 里的花括号必须写成 `{{r0-r12, lr}}`（双花括号），因为 Rust 宏把单花括号作为格式化占位符处理。
-
-# 启动第一个任务
-
-`start_first_task` 与 `context_switch` 的关键区别：
-
-- `context_switch`：先**保存**当前任务，再**恢复**下一任务
-- `start_first_task`：直接**恢复**目标任务，**不保存**当前上下文（`rust_main` 到这里就"牺牲"了，之后任务之间只用 `context_switch` 互相切换）
-
-```text
-调用 start_first_task(&TASK_A)：
-
-r0 = &TASK_A
-
-① ldr sp, [r0]
-   → sp = TASK_A.stack_ptr（指向初始帧的 r0 位置）
-
-② pop {r0-r12, lr}
-   → r0-r12 = 0，lr = task_a_fn（入口函数地址）
-
-③ bx lr
-   → 跳到 task_a_fn，任务 A 开始执行
-```
 
 # 更新 main.rs
 
@@ -214,7 +225,7 @@ pub extern "C" fn rust_main() -> ! {
 use core::arch::global_asm;
 
 pub const STACK_SIZE: usize = 512;
-pub const MAX_TASKS: usize = 4;
+pub const MAX_TASKS: usize = 8;
 
 #[repr(C)]
 pub struct Task {
@@ -242,7 +253,7 @@ pub fn create_task(entry: fn() -> !) -> Task {
 global_asm!(r#"
     .global context_switch
     .type   context_switch, %function
-    context_switch:
+context_switch:
     push {{r0-r12, lr}}
     str  sp, [r0]
     ldr  sp, [r1]
@@ -251,7 +262,7 @@ global_asm!(r#"
 
     .global start_first_task
     .type   start_first_task, %function
-    start_first_task:
+start_first_task:
     ldr  sp, [r0]
     pop  {{r0-r12, lr}}
     bx   lr

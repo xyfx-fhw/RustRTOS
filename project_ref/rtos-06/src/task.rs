@@ -1,7 +1,7 @@
 use core::arch::global_asm;
 
 pub const STACK_SIZE: usize = 512;
-pub const MAX_TASKS: usize = 4;
+pub const MAX_TASKS: usize = 8;
 
 #[repr(C)]
 pub struct Task {
@@ -29,7 +29,7 @@ pub fn create_task(entry: fn() -> !) -> Task {
 global_asm!(r#"
     .global context_switch
     .type   context_switch, %function
-    context_switch:
+context_switch:
     push {{r0-r12, lr}}
     str  sp, [r0]
     ldr  sp, [r1]
@@ -38,7 +38,7 @@ global_asm!(r#"
 
     .global start_first_task
     .type   start_first_task, %function
-    start_first_task:
+start_first_task:
     ldr  sp, [r0]
     pop  {{r0-r12, lr}}
     bx   lr

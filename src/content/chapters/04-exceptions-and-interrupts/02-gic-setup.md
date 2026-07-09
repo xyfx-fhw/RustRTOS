@@ -62,7 +62,9 @@ CPU 读取"是哪个中断触发了我"（IAR），处理完后通知 GIC"我搞
 > ```
 > `mrc`/`mcr` 是 ARM 访问"协处理器寄存器"的专用指令，`p15` 是负责系统控制的 15 号协处理器，`c12, c8, 0` 是目标寄存器在其中的编号。这类寄存器天然按核隔离——多核系统里每个核的 `mrc` 只读自己核的状态，不会互相干扰，也不占用内存地址空间。
 
-# 中断编号（INTID）
+# 中断编号与组别
+
+## 中断编号（INTID）
 
 GICv3 用 INTID 统一编号所有中断：
 
@@ -72,7 +74,7 @@ GICv3 用 INTID 统一编号所有中断：
 | 16–31 | PPI | 每个 CPU 核私有 |
 | 32–1019 | SPI | 共享外设中断，来自外部硬件 |
 
-mps3-an536 上 CMSDK DualTimer 的中断连接（来自 QEMU 源码 `mps3r.c`）：
+本章使用板子上的 **CMSDK DualTimer** 外设来产生定时中断。每个外设的中断线都硬连线到 GIC 的某个固定 SPI 编号，这个映射关系由硬件设计决定，可以从 QEMU 模拟该板子的源码 `mps3r.c` 中查到：
 
 | 定时器 | GIC SPI 编号 | INTID |
 | --- | --- | --- |
@@ -82,11 +84,11 @@ mps3-an536 上 CMSDK DualTimer 的中断连接（来自 QEMU 源码 `mps3r.c`）
 
 本章使用 **Timer 1**，INTID = **33**。
 
-# 中断组别与 FIQ 路径
+## 中断组别与 FIQ 路径
 
 在正式写代码之前，必须先搞清楚一件关键的事：**本章的 Timer 中断到底会触发 FIQ 还是 IRQ？**
 
-## Group 0 与 Group 1
+### Group 0 与 Group 1
 
 GIC 把每个中断源分配到两个"组"之一：
 
@@ -97,7 +99,7 @@ GIC 把每个中断源分配到两个"组"之一：
 
 这不是软件的选择，而是硬件的路由规则：属于哪个组，就会触发哪种异常信号。
 
-## mps3-an536 的默认状态
+### mps3-an536 的默认状态
 
 mps3-an536 上电时，所有外设中断（包括 Timer 1 的 INTID 33）**默认都在 Group 0**。
 
@@ -108,20 +110,18 @@ mps3-an536 上电时，所有外设中断（包括 Timer 1 的 INTID 33）**默�
 因此：**Timer 1 触发后，CPU 收到的是 FIQ，不是 IRQ。**
 
 > **💡 为什么不把 Timer 挪到 Group 1 去触发 IRQ？**
-> 技术上可以——向 GICD_IGROUPR1 写入相应 bit 就能把 INTID 33 重新分配到 Group 1。但这需要在安全状态（EL3 / Secure SVC）下操作，而我们从 HYP 模式启动本身就有权限限制，配置起来需要额外的安全上下文切换，引入不必要的复杂度。
->
-> 既然 Timer 默认触发 FIQ，本章就直接**顺着这条路走**，在 `fiq_handler` 里处理它。这正是上一章我们留了 `rust_fiq_handler` 占位函数的原因。
+> 技术上完全可以——向 `GICD_IGROUPR1` 写入对应 bit 就能把 INTID 33 改分配到 Group 1，触发 IRQ。但 Timer 1 默认就在 Group 0，改组是额外的工作，对本章教学没有帮助。本章的目标之一就是实现 FIQ handler，顺着默认路径走最省事。
 
-> **💡 已经切换到 SVC 模式了，还能用 Group 0 吗？**
-> 可以。**CPU 特权级**（HYP/SVC）和 **GIC 安全组**（Group 0/1）是两套正交的机制，各管各的：
-> - CPU 特权级控制的是"能不能执行某些特权指令"
-> - GIC 安全组的访问权限由 **Security State（安全状态）** 决定，不是 CPU 特权级
+> **💡 已经切换到 SVC 模式了，还能配置 Group 0 吗？**
+> 可以，这里需要区分两套机制：
+> - **CPU 特权级**（HYP → SVC）：决定"能不能执行某些特权指令"，HYP > SVC。
+> - **GIC 安全状态**（Secure / Non-Secure）：决定"能不能配置 Group 0 的中断"，与特权级无关。
 >
-> 从 HYP 切到 SVC 只改变了特权级，没有改变 Security State，因此对 GIC Group 0 的访问能力不受影响。另外，FIQ 触发时 CPU 硬件会自动从任何当前模式切换到 FIQ 模式（0x11）再跳向量表，跟之前处于 SVC 还是别的模式无关。
+> 从 HYP 切到 SVC 只降低了 CPU 特权级，没有改变安全状态——我们始终处于 Secure 状态，因此对 Group 0 的访问能力完全不受影响。
 >
-> 在真实的完整 TrustZone 系统中，Non-Secure 代码确实无法配置 Group 0——但 Cortex-R52 没有 EL3，且 QEMU 不强制执行 GIC 的安全访问限制，所以在我们的环境里一切正常。
+> （在有完整 TrustZone 的系统里，Non-Secure 代码确实无法碰 Group 0；但 Cortex-R52 没有 EL3，QEMU 也不强制执行 GIC 安全访问限制，所以本环境里没有这个问题。）
 
-## FIQ 完整处理路径
+### FIQ 完整处理路径
 
 明确了走 FIQ 路径，整个流程如下：
 
@@ -141,7 +141,7 @@ fiq_handler 读 ICC_IAR0 获取 INTID（标记为 Active）
 写 ICC_EOIR0 通知 GIC 中断处理完成（恢复为 Inactive）
 ```
 
-GIC 侧用的寄存器都是 **Group 0** 接口：`ICC_IAR0`（应答）和 `ICC_EOIR0`（结束通知），对应 AArch32 的 `c12, c8, 0` 和 `c12, c8, 1`。
+GIC CPU Interface 的 IAR 和 EOIR 各有两个版本：`ICC_IAR0`/`ICC_EOIR0` 对应 Group 0（FIQ），`ICC_IAR1`/`ICC_EOIR1` 对应 Group 1（IRQ）。因为 Timer 1 在 Group 0，必须用 Group 0 接口——用错了 `IAR1` 读出的 INTID 是 1023（表示"没有中断"），中断永远清不掉。在 AArch32 汇编里，`ICC_IAR0` 对应 `mrc p15, 0, Rd, c12, c8, 0`，`ICC_EOIR0` 对应 `mcr p15, 0, Rd, c12, c8, 1`。
 
 # 配置 GIC
 
@@ -156,7 +156,9 @@ src/
 
 ## 新建 src/gic.rs
 
-将 GIC 所有寄存器常量和初始化函数集中在这一个文件里：
+### 第一步：gic_init — 硬件初始化
+
+定义所有寄存器常量，然后依次唤醒 Redistributor、使能 Distributor、配置 INTID 33、设置 CPU Interface：
 
 ```rust
 const GICD_BASE: usize = 0xf0000000;
@@ -190,22 +192,6 @@ pub fn gic_init() {
         core::arch::asm!("mcr p15, 0, {0}, c12, c12, 6", in(reg) 1u32);
     }
 }
-
-/// 读取 Group 0 IAR（返回 INTID），同时把中断标记为 Active
-pub fn gic_ack0() -> u32 {
-    let intid: u32;
-    unsafe {
-        core::arch::asm!("mrc p15, 0, {0}, c12, c8, 0", out(reg) intid);
-    }
-    intid
-}
-
-/// 写 Group 0 EOIR，通知 GIC 中断处理完成
-pub fn gic_eoi0(intid: u32) {
-    unsafe {
-        core::arch::asm!("mcr p15, 0, {0}, c12, c8, 1", in(reg) intid);
-    }
-}
 ```
 
 **每一步的作用：**
@@ -225,6 +211,53 @@ pub fn gic_eoi0(intid: u32) {
 > - **ICC_SRE**（c12, c12, 5）在 QEMU Cortex-R52 上写入会触发未定义指令异常——QEMU 默认已将其永久置 1（系统寄存器接口始终开启），不需要也不允许软件再设置。
 > - **ICC_PMR** 和 **ICC_IGRPEN0** 必须手动配置，两者缺一不可。
 
+### 第二步：gic_ack0 / gic_eoi0 — 应答与完成通知
+
+这两个函数供 `fiq_handler` 调用，封装了 CPU Interface 的应答/EOI 流程：
+
+```rust
+/// 读取 Group 0 IAR（返回 INTID），同时把中断标记为 Active
+pub fn gic_ack0() -> u32 {
+    let intid: u32;
+    unsafe {
+        core::arch::asm!("mrc p15, 0, {0}, c12, c8, 0", out(reg) intid);
+    }
+    intid
+}
+
+/// 写 Group 0 EOIR，通知 GIC 中断处理完成
+pub fn gic_eoi0(intid: u32) {
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c12, c8, 1", in(reg) intid);
+    }
+}
+```
+
+`gic_ack0` 读 `ICC_IAR0`：GIC 返回当前中断的 INTID，同时在内部把该中断状态从 Pending 改为 Active——这一步相当于"我接单了，不要重复投递"。`gic_eoi0` 写 `ICC_EOIR0`：告诉 GIC 处理完毕，状态从 Active 恢复为 Inactive，允许下次触发。两者必须成对使用，缺任意一步都会导致中断卡死。
+
+### 第三步：cpu_enable_interrupts — 打开 CPU 侧开关
+
+```rust
+/// 清除 CPSR 的 I/F 位，允许 IRQ 和 FIQ 到达 CPU
+pub fn cpu_enable_interrupts() {
+    unsafe { core::arch::asm!("cpsie if"); }
+}
+```
+
+> **`cpu_enable_interrupts` 做了什么？**
+>
+> 它内部执行的是 `cpsie if`。`cps`（Change Processor State）是 ARM 专门用来修改 CPSR 中断屏蔽位的指令：
+> - `cpsie` — **ie** = Interrupt Enable，**开启**中断
+> - `cpsid` — **id** = Interrupt Disable，**关闭**中断
+>
+> 后面跟的字母表示操作哪些位：
+> - `i` — CPSR 的 **I 位**（bit 7），控制 IRQ：I=1 屏蔽，I=0 放行
+> - `f` — CPSR 的 **F 位**（bit 6），控制 FIQ：F=1 屏蔽，F=0 放行
+>
+> 所以 `cpsie if` 就是同时清零 I 位和 F 位，让 IRQ 和 FIQ 都能到达 CPU。
+>
+> 回想一下第 2 章 HYP→SVC 模式切换时，我们写的是 `mov r0, #0xd3`（即 `1101_0011`），其中 bit 7=1、bit 6=1，这意味着切换到 SVC 模式时 **IRQ 和 FIQ 都是关闭的**。`cpu_enable_interrupts` 就是在这里把它们重新打开。
+
 ## 新建 src/timer.rs
 
 mps3-an536 上有一个 **CMSDK APB Dual Timer** 外设，包含两个独立的倒计时器（Timer 1 / Timer 2）。工作原理很直接：把一个初值写进 LOAD 寄存器，计数器从这个值开始递减，减到 0 后触发中断，然后自动重新装载 LOAD 值继续计数——这就是周期中断的全部逻辑。
@@ -235,7 +268,7 @@ Timer 1 的寄存器基址是 `0xe0101000`，我们只用其中三个：
 | --- | --- | --- |
 | `+0x000` | LOAD | 装载值。计数器归零后从这里重新装载，决定中断周期 |
 | `+0x008` | CONTROL | 控制寄存器，各 bit 控制计数器行为（见下文） |
-| `+0x00C` | INTCLR | 中断清除。向此地址写任意值，清除 Timer 1 的中断标志 |
+| `+0x00C` | INTCLR | 中断清除。Timer 归零时会锁存一个中断标志，只要标志还置着，Timer 就持续向 GIC 拉高中断线。向此地址写任意值可以清除该标志；如果不清除，GIC 完成 EOI 后立即又看到高电平，下个周期再次触发 FIQ，形成中断风暴 |
 
 CONTROL 寄存器各 bit 的含义：
 
@@ -258,25 +291,25 @@ QEMU mps3-an536 Timer 时钟 = 50 MHz = 50_000_000 次/秒
 LOAD 值 = 50_000_000 × 0.1 = 5_000_000
 ```
 
-计数器从 5_000_000 递减到 0 恰好需要 100 ms，每 100 ms 触发一次中断，10 次后 `TICK_COUNT` 是 10，`println!` 打印一行，所以终端里约每秒出现一行 `Tick`。
-
-**为什么 `TIMER1INTCLR` 要单独声明为 `pub const`，而不是写在 `timer_init` 里？**
-
-因为它需要在 `fiq_handler` 里使用——每次 FIQ 触发后，必须写这个地址清除 Timer 1 的中断标志，GIC 才能在下次中断到来时正常投递。如果不清除，Timer 1 的中断线会一直保持高电平，FIQ 处理刚结束就立刻又来一次，形成死循环。把它暴露成 `pub const` 让 `main.rs` 可以直接引用。
+计数器从 5_000_000 递减到 0 恰好需要 100 ms，每 100 ms 触发一次中断，10 次后 `TICK_COUNT` 是 10，`println!` 打印一行，所以终端里约每秒出现一行 `Tick`。在 src/timer.rs 里添加以下代码：
 
 ```rust
-pub const TIMER1INTCLR: *mut u32 = (0xe0101000usize + 0x00C) as *mut u32;
+const TIMER1_BASE: usize = 0xe0101000;
+const TIMER1LOAD:    *mut u32 = (TIMER1_BASE + 0x000) as *mut u32;
+const TIMER1CONTROL: *mut u32 = (TIMER1_BASE + 0x008) as *mut u32;
+const TIMER1INTCLR:  *mut u32 = (TIMER1_BASE + 0x00C) as *mut u32;
 
 pub fn timer_init() {
     unsafe {
-        let load    = (0xe0101000usize + 0x000) as *mut u32;
-        let control = (0xe0101000usize + 0x008) as *mut u32;
-
         // 50 MHz 时钟，100 ms 周期 = 50_000_000 × 0.1 = 5_000_000
-        load.write_volatile(5_000_000);
+        TIMER1LOAD.write_volatile(5_000_000);
         // 0xE8 = TimerEn(1) | TimerMode(1) | IntEnable(1) | TimerSize=32bit(1)
-        control.write_volatile(0xE8);
+        TIMER1CONTROL.write_volatile(0xE8);
     }
+}
+
+pub fn timer_clear_interrupt() {
+    unsafe { TIMER1INTCLR.write_volatile(1); }
 }
 ```
 
@@ -301,27 +334,13 @@ pub extern "C" fn rust_main() -> ! {
     timer::timer_init();
 
     println!("Timer started. Waiting for FIQ...");
-    unsafe { core::arch::asm!("cpsie if"); }  // 最后才开 IRQ + FIQ
+    gic::cpu_enable_interrupts();  // 最后才开 IRQ + FIQ
 
     loop {}
 }
 ```
 
-> **`cpsie if` 是什么？**
->
-> `cps`（Change Processor State）是 ARM 专门用来修改 CPSR 中断屏蔽位的指令：
-> - `cpsie` — **ie** = Interrupt Enable，**开启**中断
-> - `cpsid` — **id** = Interrupt Disable，**关闭**中断
->
-> 后面跟的字母表示操作哪些位：
-> - `i` — CPSR 的 **I 位**（bit 7），控制 IRQ：I=1 屏蔽，I=0 放行
-> - `f` — CPSR 的 **F 位**（bit 6），控制 FIQ：F=1 屏蔽，F=0 放行
->
-> 所以 `cpsie if` 就是同时清零 I 位和 F 位，让 IRQ 和 FIQ 都能到达 CPU。
->
-> 回想一下第 2 章 HYP→SVC 模式切换时，我们写的是 `mov r0, #0xd3`（即 `1101_0011`），其中 bit 7=1、bit 6=1，这意味着切换到 SVC 模式时 **IRQ 和 FIQ 都是关闭的**。`cpsie if` 就是在这里把它们重新打开。
-
-> **注意：** `cpsie if` 必须在 GIC 和 Timer **都初始化完毕后**才执行。过早打开中断，可能在 FIQ handler 里读到未初始化的变量。
+> **注意：** `cpu_enable_interrupts` 必须在 GIC 和 Timer **都初始化完毕后**才执行。过早打开中断，可能在 FIQ handler 里读到未初始化的变量。
 
 添加 `TICK_COUNT` 全局变量和完整的 `rust_fiq_handler`（替换原来的空函数）：
 
@@ -333,10 +352,10 @@ pub extern "C" fn rust_fiq_handler() {
     let intid = gic::gic_ack0();  // 读 ICC_IAR0，标记为 Active
 
     if intid == 33 {
-        unsafe {
-            // 清除 Timer 1 中断标志（必须在 EOI 之前）
-            timer::TIMER1INTCLR.write_volatile(1);
+        // 清除 Timer 1 中断标志（必须在 EOI 之前）
+        timer::timer_clear_interrupt();
 
+        unsafe {
             TICK_COUNT += 1;
             if TICK_COUNT % 10 == 0 {
                 println!("Tick: {}", TICK_COUNT as u32);
@@ -361,6 +380,9 @@ qemu-system-arm \
 ```
 
 预期输出（每约 1 秒一行）：
+
+> **为什么是 1 秒一行，而不是 100ms 一行？**
+> Timer 确实每 100ms 触发一次 FIQ，`TICK_COUNT` 每次加 1。但 handler 里的条件是 `TICK_COUNT % 10 == 0` 才打印，所以每 10 次中断才输出一行：10 × 100ms = 1 秒。`Tick: 10` 表示已经收到了 10 次中断。
 
 ```text
 Hello from RTOS!

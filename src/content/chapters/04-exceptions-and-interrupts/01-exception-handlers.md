@@ -48,19 +48,20 @@ IRQ、FIQ、SVC、ABT、UND 这几种异常模式各自都有独立的 `sp`（SP
 
 > **注意：** `r0`–`r12` 没有 banked 版本（FIQ 例外，它有独立的 `r8`–`r12`）。这意味着异常处理函数**必须手动保存** `r0`–`r12`，否则会覆盖被中断代码的数据。
 
-# 异常发生时 CPU 自动做了什么
+# 如何写一个正确的 handler
 
 以 IRQ 为例，当外部中断触发时，CPU **自动完成**以下动作（不需要软件干预）：
+
+> **CPSR / SPSR 是什么？**
+> `CPSR`（Current Program Status Register，当前程序状态寄存器）记录 CPU **此刻**的运行状态：当前模式（USR/SVC/IRQ…）、条件标志位（N/Z/C/V）、IRQ/FIQ 是否被屏蔽等。`SPSR`（Saved Program Status Register）是每种异常模式各自拥有的"备份槽"，专门用来在切换模式时保存被打断时的 CPSR，以便之后恢复现场。
 
 1. `SPSR_irq ← CPSR`（把当前程序状态保存到 IRQ 模式的 SPSR）
 2. `LR_irq ← 下一条应执行指令的地址 + 4`（记录返回地址，带 +4 偏移）
 3. 切换到 IRQ 模式（CPSR 中的模式位改变，SP 和 LR 自动切换到 SP_irq、LR_irq）
-4. 禁用 IRQ（防止嵌套中断，CPSR.I 置 1）
+4. 禁用 IRQ（防止嵌套中断，CPSR.I 置 1）——此期间新来的中断信号由 GIC 锁存为 Pending 状态，不会丢失，待处理函数返回重新开中断后立即响应
 5. 跳转到向量表 `0x00000018`（执行我们的 `b irq_handler` 指令）
 
 CPU **没有**自动保存的东西：`r0`–`r12`，这些必须由我们的处理函数手动保存。
-
-# 如何写一个正确的 handler
 
 以 IRQ handler 为例，框架如下：
 
@@ -72,15 +73,20 @@ irq_handler:
     subs pc, lr, #4          @ 从 IRQ 返回：PC = LR - 4，同时恢复 CPSR
 ```
 
-**为什么不需要在 handler 开头初始化 SP？** 每种异常模式都有独立的 banked SP，上电时确实是未初始化的。本章将在步骤三更新 `reset_handler`，在进入 `rust_main` 之前为所有异常模式批量设置好 SP——这比在每个 handler 里各自初始化更安全（因为连 handler 入口的第一条指令都要用到 SP）。
+**为什么不需要在 handler 开头初始化 SP？** 每种异常模式都有独立的 banked SP，上电时确实是未初始化的。本章将在后续实现 fault handler 里更新 `reset_handler`，在进入 `rust_main` 之前为所有异常模式批量设置好 SP——这比在每个 handler 里各自初始化更安全（因为连 handler 入口的第一条指令都要用到 SP）。
 
-最后一行 `subs pc, lr, #4` 是 AArch32 从异常返回的标准写法：
-- 把 `LR - 4` 写入 PC（跳回被中断的代码）
-- `s` 后缀表示同时把 SPSR_irq 恢复回 CPSR（恢复被打断时的处理器状态）
+执行 `subs pc, lr, #4` 时，CPU **原子地**完成两件事：
 
-没有这个 `s` 后缀，CPSR 不会恢复，CPU 会留在 IRQ 模式继续运行，结果一片混乱。
+```text
+1. PC ← LR_irq - 4        （跳回被打断的代码）
+2. CPSR ← SPSR_irq        （还原中断前的 CPU 状态）
+```
 
-# 不同异常类型的返回指令
+"原子地"的意思是这两步同时生效：模式位改变（从 IRQ 模式变回 SVC 模式）、IRQ 使能位恢复、所有条件标志位恢复，都在一条指令里完成。
+
+如果没有 `s` 后缀（写成 `sub pc, lr, #4`），PC 会正确跳回，但 CPSR 留在 IRQ 模式的设置不变：CPU 模式没变、IRQ 还是禁用的、条件标志位也是中断处理过程中的值——程序后续行为完全混乱。
+
+## 不同异常类型的返回指令
 
 不同异常进入时，LR 的偏移不同，返回指令也不同：
 
@@ -98,55 +104,50 @@ irq_handler:
 
 ## 步骤一：汇编包装函数
 
-为每种异常写一个汇编包装器，保存现场后调用 Rust 函数：
+在 main.rs 里为每种异常写一个汇编包装器，保存现场后调用 Rust 函数：
 
 ```rust
-global_asm!(r#"
-    // 异常处理函数（各模式 SP 已由 reset_handler 批量初始化，handler 无需再设置）
-    .section .text.handlers, "ax"
-
-    undef_handler:
+undef_handler:
     push {{r0-r12, lr}}
-    bl rust_undef_handler      // 不会返回（-> !）
+    bl rust_undef_handler      @ 不会返回（-> !）
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    svc_handler:
+svc_handler:
     push {{r0-r12, lr}}
     bl rust_svc_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    prefetch_handler:
+prefetch_handler:
     sub lr, lr, #4
     push {{r0-r12, lr}}
     bl rust_prefetch_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    data_handler:
-    sub lr, lr, #8             // Data Abort LR 偏移 8
+data_handler:
+    sub lr, lr, #8             @ Data Abort LR 偏移 8
     push {{r0-r12, lr}}
     bl rust_data_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    hang:
+hang:
     wfi
     b hang
 
-    irq_handler:               // 将在 02-gic-setup.md 中替换为真实实现
+irq_handler:               @ 将在 02-gic-setup.md 中替换为真实实现
     push {{r0-r12, lr}}
     bl rust_irq_handler
     pop {{r0-r12, lr}}
     subs pc, lr, #4
 
-    fiq_handler:
+fiq_handler:
     push {{r0-r12, lr}}
     bl rust_fiq_handler
     pop {{r0-r12, lr}}
     subs pc, lr, #4
-"#);
 ```
 
 ## 步骤二：Rust 处理函数
@@ -187,49 +188,38 @@ pub extern "C" fn rust_fiq_handler() {
 }
 ```
 
-## 步骤三：完善 Reset Handler（填补系统状态与影子栈）
+## 步骤三：完善 Reset Handler（初始化各模式影子栈）
 
-在最终拼装代码前，你会在完整的 `reset_handler` 里看到两段关键汇编代码。第一段 **HYP 模式降级**从第 2 章延续而来；第二段**各异常模式 SP 批量初始化**是本章新引入的内容——正是因为在 `reset_handler` 里统一完成了所有模式的 SP 设置，单个 handler 才不再需要各自执行 `ldr sp`。
+前面讲到了我们不在每个 handler 开头各自初始化 SP，而是在 `reset_handler` 里统一批量完成——正是因为如此，单个 handler 才不再需要各自执行 `ldr sp`。
 
-### 1. HYP 模式降级（必须切到 SVC）
+具体位置是在 `reset_handler` 内部 `.Lnormal_init:` 标号之后、清零 BSS 之前（`.Lnormal_init` 只是 reset_handler 内的一个内部跳转锚点，不是独立函数）：
 
-```rust
-    // mps3-an536 以 HYP 模式启动，需切换到 SVC 模式才能使用普通向量表
-    mrs r0, cpsr
-    and r0, r0, #0x1f
-    cmp r0, #0x1a          // 0x1a = HYP 模式
-    bne .Lnormal_init
-    mov r0, #0xd3          // SVC 模式（AArch32 EL1），禁 IRQ/FIQ
-    msr spsr_cxsf, r0
-    adr r0, .Lnormal_init
-    msr elr_hyp, r0
-    eret                   // 切换到 SVC 模式，跳到 .Lnormal_init
-    .Lnormal_init:
-```
-
-**mps3-an536** 模拟器上电时，CPU 默认处于**虚拟化特权（HYP，AArch32 EL2）模式**。在 HYP 模式下，中断向量表受另一个独立寄存器（HVBAR）控制，与我们的 `0x00000000` 无关。若不切换到普通的内核特权模式（SVC），系统根本不会去看我们写在 0 地址的向量表，随后的任何外设中断也永远无法触发我们的处理代码。
-
-所以必须在清空内存之前，利用 `eret`（异常返回）指令，硬生生把 CPU 从 HYP 模式“退回”到 SVC 模式，并跳向 `.Lnormal_init` 标号，从而真正取回普通系统的控制权。
-
-### 2. 寄存器影子系统与各模式栈指针（SP）初始化
-
-```rust
-    // 初始化各异常模式的栈指针（共享同一个栈顶，仅用于简单 fault 处理）
+```asm
+.Lnormal_init:
+    @ 初始化各异常模式的栈指针（共享同一个栈顶，仅用于简单 fault 处理）
     msr cpsr_c, #0xdb
-    ldr sp, =_stack_start  // Undefined 模式
+    ldr sp, =_stack_start  @ Undefined 模式
     msr cpsr_c, #0xd7
-    ldr sp, =_stack_start  // Abort 模式
+    ldr sp, =_stack_start  @ Abort 模式
     msr cpsr_c, #0xd2
-    ldr sp, =_stack_start  // IRQ 模式
+    ldr sp, =_stack_start  @ IRQ 模式
     msr cpsr_c, #0xd1
-    ldr sp, =_stack_start  // FIQ 模式
+    ldr sp, =_stack_start  @ FIQ 模式
     msr cpsr_c, #0xd3
-    ldr sp, =_stack_start  // 回到 SVC 模式
+    ldr sp, =_stack_start  @ 回到 SVC 模式
+    @ 之后继续清零 BSS、复制 .data、跳 rust_main...
 ```
 
-在 ARM 中，**每进一种异常模式，CPU 都会切出一套专属于该模式的“影子分身（Banked Registers）”——其中包括独立的栈指针 SP**。如果你只在 SVC 模式下设定了 SP，一旦触发 Data Abort 硬件将 CPU 切入 Abort 模式，它使用的专属影子 SP 就会是一片未经设定的内存垃圾！此时你在处理函数里哪怕只要执行一次 `push` ，就会立刻因为内存崩溃（踩到非法地址）引发绝望的连环死机！
+在 ARM 中，**每进一种异常模式，CPU 都会切出一套专属于该模式的”影子分身（Banked Registers）”——其中包括独立的栈指针 SP**。如果你只在 SVC 模式下设定了 SP，一旦触发 Data Abort 硬件将 CPU 切入 Abort 模式，它使用的专属影子 SP 就会是一片未经设定的内存垃圾！此时你在处理函数里哪怕只要执行一次 `push` ，就会立刻因为内存崩溃（踩到非法地址）引发绝望的连环死机！
 
-所以，在进入内核（`rust_main`）执行前，我们必须通过操作控制寄存器（`CPSR_c`）反复横跳到各个即将使用到的异常模式（Undefined: `0xdb`、Abort: `0xd7`、IRQ: `0xd2` 等），并为它们逐一将 `sp` 设为 `_stack_start`（在本小项目中，为了省事，所有的异常目前共享同一个大工作栈），全部安顿好以后最后再切回 SVC（`0xd3`）。
+所以，在进入内核（`rust_main`）执行前，我们必须通过操作控制寄存器（`CPSR_c`）反复横跳到各个即将使用到的异常模式（Undefined: `0xdb`、Abort: `0xd7`、IRQ: `0xd2` 等），并为它们逐一将 `sp` 设为 `_stack_start`，全部安顿好以后最后再切回 SVC（`0xd3`）。
+
+> **为什么让所有模式共用同一个 `_stack_start`，不会出问题吗？**
+> 在本教程这个场景里，能跑通的原因有两点：
+> 1. 所有 fault handler（Undef、Data Abort 等）的返回类型是 `-> !`，触发后死循环不再返回，不会和 SVC 栈互踩。
+> 2. IRQ handler 虽然会返回，但它的 `push`/`pop` 对称，用完即还原，不留残留。
+>
+> **真正的风险**是异常嵌套：如果 IRQ 处理过程中再发生 Data Abort，两个模式会从同一个地址向下压栈，互相覆盖彼此的数据，造成难以调试的崩溃。生产级 RTOS 会为每个模式划分独立的栈区段（比如 IRQ 栈 512 字节、ABT 栈 256 字节），这里共用是有意识的教学简化，不是正确的工程实践。
 
 ## 步骤四：完整的 src/main.rs
 
@@ -243,10 +233,10 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 global_asm!(r#"
-    // 向量表
+    @ 向量表
     .section .text.vector_table, "ax"
     .global _vectors
-    _vectors:
+_vectors:
     b reset_handler
     b undef_handler
     b svc_handler
@@ -256,90 +246,90 @@ global_asm!(r#"
     b irq_handler
     b fiq_handler
 
-    // 异常处理函数
+    @ 异常处理函数
     .section .text.handlers, "ax"
-    undef_handler:
+undef_handler:
     push {{r0-r12, lr}}
     bl rust_undef_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    svc_handler:
+svc_handler:
     push {{r0-r12, lr}}
     bl rust_svc_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    prefetch_handler:
+prefetch_handler:
     sub lr, lr, #4
     push {{r0-r12, lr}}
     bl rust_prefetch_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    data_handler:
+data_handler:
     sub lr, lr, #8
     push {{r0-r12, lr}}
     bl rust_data_handler
     pop {{r0-r12, lr}}
     movs pc, lr
 
-    hang:
+hang:
     wfi
     b hang
 
-    irq_handler:
+irq_handler:
     push {{r0-r12, lr}}
     bl rust_irq_handler
     pop {{r0-r12, lr}}
     subs pc, lr, #4
 
-    fiq_handler:
+fiq_handler:
     push {{r0-r12, lr}}
     bl rust_fiq_handler
     pop {{r0-r12, lr}}
     subs pc, lr, #4
 
-    // Reset handler
+    @ Reset handler
     .section .text.reset_handler, "ax"
     .global reset_handler
-    reset_handler:
-    // mps3-an536 以 HYP 模式启动，需切换到 SVC 模式才能使用普通向量表
+reset_handler:
+    @ mps3-an536 以 HYP 模式启动，需切换到 SVC 模式才能使用普通向量表
     mrs r0, cpsr
     and r0, r0, #0x1f
-    cmp r0, #0x1a          // 0x1a = HYP 模式
+    cmp r0, #0x1a          @ 0x1a = HYP 模式
     bne .Lnormal_init
-    mov r0, #0xd3           // SVC 模式，禁 IRQ/FIQ
+    mov r0, #0xd3           @ SVC 模式，禁 IRQ/FIQ
     msr spsr_cxsf, r0
     adr r0, .Lnormal_init
     msr elr_hyp, r0
-    eret                    // 切换到 SVC 模式，跳到 .Lnormal_init
-    .Lnormal_init:
-    // 初始化各异常模式的栈指针（共享同一个栈顶，仅用于简单 fault 处理）
+    eret                    @ 切换到 SVC 模式，跳到 .Lnormal_init
+.Lnormal_init:
+    @ 初始化各异常模式的栈指针（共享同一个栈顶，仅用于简单 fault 处理）
     msr cpsr_c, #0xdb
-    ldr sp, =_stack_start  // Undefined 模式
+    ldr sp, =_stack_start  @ Undefined 模式
     msr cpsr_c, #0xd7
-    ldr sp, =_stack_start  // Abort 模式
+    ldr sp, =_stack_start  @ Abort 模式
     msr cpsr_c, #0xd2
-    ldr sp, =_stack_start  // IRQ 模式
+    ldr sp, =_stack_start  @ IRQ 模式
     msr cpsr_c, #0xd1
-    ldr sp, =_stack_start  // FIQ 模式
+    ldr sp, =_stack_start  @ FIQ 模式
     msr cpsr_c, #0xd3
-    ldr sp, =_stack_start  // 回到 SVC 模式
+    ldr sp, =_stack_start  @ 回到 SVC 模式
     ldr r0, =_sbss
     ldr r1, =_ebss
     mov r2, #0
-    1:
+1:
     cmp r0, r1
     bhs 2f
     str r2, [r0]
     add r0, r0, #4
     b 1b
-    2:
+2:
     ldr r0, =_sdata
     ldr r1, =_edata
     ldr r2, =_sidata
-    3:
+3:
     cmp r0, r1
     bhs 4f
     ldr r3, [r2]
@@ -347,9 +337,11 @@ global_asm!(r#"
     add r0, r0, #4
     add r2, r2, #4
     b 3b
-    4:
+4:
     bl rust_main
-    5:
+
+    @ 安全保底死循环
+5:
     wfi
     b 5b
 "#);

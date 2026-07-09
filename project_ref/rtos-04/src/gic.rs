@@ -18,8 +18,8 @@ pub fn gic_init() {
         GICD_CTLR.write_volatile(0x1);
 
         // 3. INTID 33：设置优先级、路由到 CPU 0、使能
-        GICD_IPRIORITYR.add(33).write_volatile(0xA0);
-        GICD_ITARGETSR.add(33).write_volatile(0x01);
+        GICD_IPRIORITYR.add(33).write_volatile(0xA0);  // .add(33) = 基址 + 33 字节，定位到 INTID 33 的优先级寄存器
+        GICD_ITARGETSR.add(33).write_volatile(0x01);   // 同上，定位到 INTID 33 的 CPU 路由寄存器
         GICD_ISENABLER1.write_volatile(1 << (33 % 32));
 
         // 4. CPU Interface：优先级掩码 + Group 0 使能
@@ -44,4 +44,9 @@ pub fn gic_eoi0(intid: u32) {
     unsafe {
         core::arch::asm!("mcr p15, 0, {0}, c12, c8, 1", in(reg) intid);
     }
+}
+
+/// 清除 CPSR 的 I/F 位，允许 IRQ 和 FIQ 到达 CPU
+pub fn cpu_enable_interrupts() {
+    unsafe { core::arch::asm!("cpsie if"); }
 }

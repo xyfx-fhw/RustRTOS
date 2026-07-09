@@ -2,6 +2,8 @@
 #![no_main]
 
 mod uart;
+mod gic;
+mod timer;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -20,41 +22,76 @@ _vectors:
     b irq_handler
     b fiq_handler
 
-    @ 异常处理桩
+    @ 异常处理函数
     .section .text.handlers, "ax"
 undef_handler:
-    b undef_handler
+    push {{r0-r12, lr}}
+    bl rust_undef_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
+
 svc_handler:
-    b svc_handler
+    push {{r0-r12, lr}}
+    bl rust_svc_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
+
 prefetch_handler:
-    b prefetch_handler
+    sub lr, lr, #4
+    push {{r0-r12, lr}}
+    bl rust_prefetch_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
+
 data_handler:
-    b data_handler
+    sub lr, lr, #8
+    push {{r0-r12, lr}}
+    bl rust_data_handler
+    pop {{r0-r12, lr}}
+    movs pc, lr
+
 hang:
     wfi
     b hang
-irq_handler:
-    b irq_handler
-fiq_handler:
-    b fiq_handler
 
-    @ Reset handler（初始化代码）
+irq_handler:
+    push {{r0-r12, lr}}
+    bl rust_irq_handler
+    pop {{r0-r12, lr}}
+    subs pc, lr, #4
+
+fiq_handler:
+    push {{r0-r12, lr}}
+    bl rust_fiq_handler
+    pop {{r0-r12, lr}}
+    subs pc, lr, #4
+
+    @ Reset handler
     .section .text.reset_handler, "ax"
     .global reset_handler
 reset_handler:
-    @ 0. 检测 HYP 模式（mps3-an536 以 HYP 模式启动），切换到 SVC
+    @ mps3-an536 以 HYP 模式启动，需切换到 SVC 模式才能使用普通向量表
     mrs r0, cpsr
     and r0, r0, #0x1f
-    cmp r0, #0x1a
+    cmp r0, #0x1a          @ 0x1a = HYP 模式
     bne .Lnormal_init
-    mov r0, #0xd3
+    mov r0, #0xd3           @ SVC 模式，禁 IRQ/FIQ
     msr spsr_cxsf, r0
     adr r0, .Lnormal_init
     msr elr_hyp, r0
-    eret                    @ 切换到 SVC 模式（AArch32 EL1），跳到 .Lnormal_init
+    eret                    @ 切换到 SVC 模式，跳到 .Lnormal_init
 .Lnormal_init:
-    @ 1. 设置栈指针
-    ldr sp, =_stack_start
+    @ 初始化各异常模式的栈指针（共享同一个栈顶，仅用于简单 fault 处理）
+    msr cpsr_c, #0xdb
+    ldr sp, =_stack_start  @ Undefined 模式
+    msr cpsr_c, #0xd7
+    ldr sp, =_stack_start  @ Abort 模式
+    msr cpsr_c, #0xd2
+    ldr sp, =_stack_start  @ IRQ 模式
+    msr cpsr_c, #0xd1
+    ldr sp, =_stack_start  @ FIQ 模式
+    msr cpsr_c, #0xd3
+    ldr sp, =_stack_start  @ 回到 SVC 模式
     ldr r0, =_sbss
     ldr r1, =_ebss
     mov r2, #0
@@ -89,8 +126,62 @@ reset_handler:
 pub extern "C" fn rust_main() -> ! {
     uart::uart_init();
     println!("Hello from RTOS!");
-    println!("Board: mps3-an536  CPU: Cortex-R52");
+
+    gic::gic_init();
+    timer::timer_init();
+
+    println!("Timer started. Waiting for FIQ...");
+    gic::cpu_enable_interrupts();  // 最后才开 IRQ + FIQ
+
     loop {}
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_undef_handler() -> ! {
+    println!("FAULT: Undefined Instruction");
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_svc_handler() -> ! {
+    println!("FAULT: SVC (not implemented)");
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_prefetch_handler() -> ! {
+    println!("FAULT: Prefetch Abort");
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_data_handler() -> ! {
+    println!("FAULT: Data Abort");
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_irq_handler() {}
+
+static mut TICK_COUNT: u32 = 0;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_fiq_handler() {
+    let intid = gic::gic_ack0();  // 读 ICC_IAR0，标记为 Active
+
+    if intid == 33 {
+        // 清除 Timer 1 中断标志（必须在 EOI 之前）
+        timer::timer_clear_interrupt();
+
+        unsafe {
+            TICK_COUNT += 1;
+            if TICK_COUNT % 10 == 0 {
+                println!("Tick: {}", TICK_COUNT as u32);
+            }
+        }
+    }
+
+    gic::gic_eoi0(intid);  // 写 ICC_EOIR0，通知 GIC 处理完毕
 }
 
 #[panic_handler]

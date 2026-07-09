@@ -66,7 +66,9 @@ sp+60: cpsr      ─── SRSDB 写入（= 被中断的 CPSR）
 
 # FIQ Handler 完整改写
 
-## 新的 fiq_handler（task.rs）
+## 新的 fiq_handler（main.rs）
+
+**位置：`src/main.rs` → `global_asm!` 块，替换原有的 FIQ 向量跳转代码**
 
 ```asm
 // ── fiq_handler：SRSDB + CPS + PUSH，在任务 SVC 栈上直接建 16 字帧 ──────────
@@ -105,6 +107,8 @@ fiq_handler:
 
 ## 协作式 context_switch（手动建相同格式的帧）
 
+**位置：`src/task.rs` → `global_asm!` 块，替换第 06 章的 `context_switch`（原来的 push/pop/bx lr 版本）**
+
 ```asm
 context_switch:                  // r0=curr, r1=next
     sub  sp, sp, #64             // 预留 16 字
@@ -124,19 +128,51 @@ context_switch:                  // r0=curr, r1=next
 
 ## create_task_with_arg 初始帧
 
-```rust
-stack[STACK_SIZE - 16] = arg_r0 as u32;   // r0 = 用户函数指针
-// r1-r12 = 0（已零初始化）
-stack[STACK_SIZE - 3]  = 0;               // lr_svc（新任务无意义）
-stack[STACK_SIZE - 2]  = entry_pc as u32; // resume_pc = task_entry_wrapper
-stack[STACK_SIZE - 1]  = 0x13;            // cpsr: SVC 模式，FIQ/IRQ 使能
+**位置：`src/task.rs`，将 01 节中的 `create_task_with_arg`（14 字帧）替换为此 16 字帧版本**
 
-Task { stack_ptr: &mut stack[STACK_SIZE - 16] as *mut u32 }
+16 字帧与 FIQ handler 保存的帧格式完全相同，恢复路径统一为 `pop {r0-r12, lr}; rfeia sp!`：
+
+```rust
+pub fn create_task_with_arg(wrapper: usize, arg: usize) -> Task {
+    unsafe {
+        let id = TASK_COUNT;
+        TASK_COUNT += 1;
+
+        let stack = &mut TASK_STACKS[id];
+        // 16 字初始帧，布局与 fiq_handler 保存的帧相同：
+        //   [STACK_SIZE-16..STACK_SIZE-4]  r0-r12
+        //   [STACK_SIZE-3]                 lr_svc
+        //   [STACK_SIZE-2]                 resume_pc  ← rfeia 加载 PC 的位置
+        //   [STACK_SIZE-1]                 cpsr       ← rfeia 加载 CPSR 的位置
+        stack[STACK_SIZE - 16] = arg as u32;     // r0 = 用户函数指针（wrapper 进入时读取）
+        // r1-r12 已为 0（static 零初始化）
+        stack[STACK_SIZE - 3]  = 0;              // lr_svc（新任务无调用链，rfeia 不会用到它）
+        stack[STACK_SIZE - 2]  = wrapper as u32; // resume_pc = task_entry_wrapper 地址
+        stack[STACK_SIZE - 1]  = 0x13;           // cpsr = 0x13：SVC 模式，F/I 位 = 0（FIQ/IRQ 使能）
+
+        Task {
+            stack_ptr: &mut stack[STACK_SIZE - 16] as *mut u32,
+        }
+    }
+}
 ```
+
+与 01 节的 14 字帧相比，三处变化：
+
+| 字段 | 14 字帧（01 节） | 16 字帧（本节） |
+| --- | --- | --- |
+| `stack_ptr` 指向 | `STACK_SIZE - 14`（r0 处） | `STACK_SIZE - 16`（r0 处） |
+| `lr`（位置 13） | `wrapper` 地址，`bx lr` 跳入 | `0`，新任务无调用链 |
+| `resume_pc`（位置 14） | 不存在 | `wrapper` 地址，`rfeia` 加载 PC |
+| `cpsr`（位置 15） | 不存在 | `0x13`，`rfeia` 加载 CPSR |
+
+旧版本用 `bx lr` 跳入 wrapper，新版本用 `rfeia sp!` 同时恢复 PC 和 CPSR，两种方式最终效果相同，但新版本 CPSR 被正确初始化（SVC 模式、中断使能），任务从第一条指令开始就处于正确的处理器状态。
 
 # 优先级调度
 
 ## add_task 新增 priority 参数
+
+**位置：`src/scheduler.rs`，01 节已完整实现，此处仅示意函数签名包含 `priority: u8`**
 
 ```rust
 // scheduler.rs
@@ -146,6 +182,8 @@ pub fn add_task(entry: fn(), priority: u8) {
 ```
 
 ## scheduler_tick 优先级逻辑
+
+**位置：`src/scheduler.rs`，01 节已给出完整代码，此处为关键优先级逻辑的摘要视图**
 
 ```rust
 #[unsafe(no_mangle)]
@@ -181,6 +219,44 @@ pub extern "C" fn scheduler_tick() {
 
 # 验证方法
 
+## 修改 main.rs — 演示一：抢占验证
+
+用两个不同优先级的任务验证真抢占：高优先级任务（`task_10ms`）在低优先级任务（`task_20ms`）的忙等过程中强制插入。
+
+**将 `src/main.rs` 里的任务函数和 `rust_main` 替换为以下内容：**
+
+```rust
+fn task_10ms() {   // priority 3，最高
+    loop {
+        println!("[10ms p3] <<< PREEMPT >>> tick={}", tick::get_ticks());
+        scheduler::sleep_ticks(10);
+    }
+}
+
+fn task_20ms() {   // priority 2，用 delay_ticks 忙等模拟长时间工作
+    loop {
+        println!("[20ms p2] START tick={}", tick::get_ticks());
+        tick::delay_ticks(15);   // 忙等 15 tick，期间不主动让出 CPU
+        println!("[20ms p2] END   tick={}", tick::get_ticks());
+        scheduler::sleep_ticks(5);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_main() -> ! {
+    uart::uart_init();
+    println!("Hello from RTOS!");
+    gic::gic_init();
+    timer::timer_init();
+
+    scheduler::add_task(task_20ms, 2);
+    scheduler::add_task(task_10ms, 3);
+    scheduler::start();
+}
+```
+
+## 编译并运行
+
 ```bash
 cargo build
 qemu-system-arm \
@@ -189,49 +265,60 @@ qemu-system-arm \
   -device loader,file=target/armv8r-none-eabihf/debug/rtos
 ```
 
-## 演示一：优先级独占 + 真抢占（高优先级在运行中打断低优先级）
+## 预期输出
+
+```text
+[20ms p2] START tick=0
+[10ms p3] <<< PREEMPT >>> tick=10   ← task_10ms 在 task_20ms 忙等期间强制插入
+[20ms p2] END   tick=15             ← task_10ms sleep 结束后，task_20ms 从被打断处继续
+[10ms p3] <<< PREEMPT >>> tick=20
+[20ms p2] START tick=20
+...
+```
+
+抢占发生在 `START` 和 `END` 之间——`task_20ms` 并没有调用 yield，是被 FIQ 定时器强制切换的。
+
+## 修改 main.rs — 演示二：多优先级周期任务
+
+**将任务函数和 `rust_main` 替换为以下内容：**
 
 ```rust
-fn task_10ms() {  // priority 3
+fn task_5ms() {    // priority 3
     loop {
-        println!("[10ms p3] <<< PREEMPT >>> tick={}", tick::get_ticks());
-        scheduler::sleep_ticks(10);
-    }
-}
-
-fn task_20ms() {  // priority 2：用 delay_ticks 忙等模拟长时间工作
-    loop {
-        println!("[20ms p2] START tick={}", tick::get_ticks());
-        tick::delay_ticks(15);  // 忙等 15 tick，期间不让出 CPU
-        println!("[20ms p2] END   tick={}", tick::get_ticks());
+        println!("[5ms  p3] tick={}", tick::get_ticks());
         scheduler::sleep_ticks(5);
     }
 }
 
-// main:
-scheduler::add_task(task_20ms, 2);
-scheduler::add_task(task_10ms, 3);
-scheduler::start();
+fn task_13ms() {   // priority 2
+    loop {
+        println!("[13ms p2] tick={}", tick::get_ticks());
+        scheduler::sleep_ticks(13);
+    }
+}
+
+fn task_bg() {     // priority 1，填补空隙
+    loop {
+        println!("[bg   p1] tick={}", tick::get_ticks());
+        scheduler::sleep_ticks(3);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_main() -> ! {
+    uart::uart_init();
+    println!("Hello from RTOS!");
+    gic::gic_init();
+    timer::timer_init();
+
+    scheduler::add_task(task_bg,   1);
+    scheduler::add_task(task_13ms, 2);
+    scheduler::add_task(task_5ms,  3);
+    scheduler::start();
+}
 ```
 
-预期输出（抢占发生在 `START` 和 `END` 之间）：
-
-```text
-[20ms p2] START tick=0
-[10ms p3] <<< PREEMPT >>> tick=10   ← 10ms 任务在 task_20ms 运行中强制插入
-[20ms p2] END   tick=15             ← 10ms 任务结束后，task_20ms 从中断处恢复
-```
-
-## 演示二：多优先级周期任务（sleep_ticks 真睡眠）
-
-```rust
-scheduler::add_task(task_bg,   1);  // 3 tick 周期，填补空隙
-scheduler::add_task(task_13ms, 2);  // 13 tick 周期
-scheduler::add_task(task_5ms,  3);  // 5 tick 周期，最高优先级
-scheduler::start();
-```
-
-预期：5ms 任务每 5 tick 精确出现，期间 13ms 和 bg 任务分别运行；全部睡眠时 idle 任务 wfi 等待。
+预期：5ms 任务精确每 5 tick 出现，期间 13ms 和 bg 任务分别填补空隙；所有任务都睡眠时 idle 任务执行 `wfi`，输出静默直到下一次唤醒。
 
 # 练习题
 

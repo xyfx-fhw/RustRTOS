@@ -45,8 +45,3 @@ pub fn gic_eoi0(intid: u32) {
         core::arch::asm!("mcr p15, 0, {0}, c12, c8, 1", in(reg) intid);
     }
 }
-
-/// 清除 CPSR 的 I/F 位，允许 IRQ 和 FIQ 到达 CPU
-pub fn cpu_enable_interrupts() {
-    unsafe { core::arch::asm!("cpsie if"); }
-}

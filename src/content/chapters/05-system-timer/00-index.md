@@ -53,6 +53,8 @@ pub fn tick_increment() {
 /// 必须用 read_volatile，否则编译器会在主线程紧循环中
 /// 把读取优化为寄存器缓存，永远看不到 FIQ 写入的新值。
 pub fn get_ticks() -> u32 {
+    // &raw const 直接产生裸指针，不经过引用
+    // 避免 &TICK_COUNT 隐含的"独占访问"假设与 FIQ 并发写入冲突（UB）
     unsafe { (&raw const TICK_COUNT).read_volatile() }
 }
 ```
@@ -86,8 +88,8 @@ mod tick;
 pub extern "C" fn rust_fiq_handler() {
     let intid = gic::gic_ack0();
     if intid == 33 {
-        unsafe { tick::tick_increment(); }
-        unsafe { timer::TIMER1INTCLR.write_volatile(1); }
+        timer::timer_clear_interrupt();
+        tick::tick_increment();
     }
     gic::gic_eoi0(intid);
 }
@@ -100,7 +102,7 @@ pub extern "C" fn rust_main() -> ! {
     gic::gic_init();
     timer::timer_init();
     println!("Timer started, 100ms tick.");
-    unsafe { core::arch::asm!("cpsie if"); }  // 最后才开 IRQ + FIQ
+    gic::cpu_enable_interrupts();  // 最后才开 IRQ + FIQ
 
     let mut last = 0u32;
     loop {
@@ -142,9 +144,13 @@ pub fn delay_ms(ms: u32) {
 }
 ```
 
-# 关于 QEMU 定时器频率的限制
+> 这里 delay_ms 暂时没有被使用到，可能存在一些告警，我们先不管它
 
-## 为什么 tick 周期选 100ms 而不是 1ms
+# 一些额外的解释
+
+## 关于 QEMU 定时器频率的限制
+
+### 为什么 tick 周期选 100ms 而不是 1ms
 
 真实的 RTOS tick 通常是 1ms（1 kHz）。按照 50MHz 时钟换算，加载值应该是 50,000。但在 QEMU 上直接使用 1ms 定时器会产生一个隐蔽的性能问题，导致输出长时间不出现。
 
@@ -176,7 +182,7 @@ QEMU 的 CMSDK DualTimer 不是按模拟 CPU 周期计时，而是挂在主机�
 
 因此本章（以及后续章节）在 QEMU 环境下统一使用 **100ms 定时器（5_000_000 加载值）**，并通过 `TICK_PERIOD_MS = 100` 让上层代码仍以毫秒为单位推算时间。
 
-# 关于临界区
+## 关于临界区
 
 `get_ticks()` 在单核系统上是安全的，因为：
 

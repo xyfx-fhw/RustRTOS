@@ -64,49 +64,13 @@ pub struct Task {
 
 仅此而已——目前不需要优先级、状态标志等字段（第 07 章调度器再加）。
 
-> **为什么用 `*mut u32` 而不是 `&mut u32`？**
->
-> 如果你尝试改为 `&mut u32`，编译器会让你陷入无尽的报错中，主要原因有三：
->
-> 1. **违反唯一借用原则**：Rust 要求 `&mut` 在同一时刻只能有一个人持有。但在 RTOS 中，`sp` 的值会被汇编代码频繁修改，且多个任务的 `TCB` 同时存在于全局变量中。借用检查器无法证明这种“跨越汇编与 Rust”的操作是独占的，从而拒绝编译。
-> 2. **生命周期僵局**：`TCB` 通常存储在 `static` 全局变量中。按照 Rust 规则，引用的生命周期必须比持有它的结构体长。这意味着你必须证明 `sp` 指向的内存是 `'static` 的。为了满足这个要求，你会发现整个内核的代码都要填满复杂的生命周期标注（如 `Task<'a>`），最终导致代码臃肿到无法维护。
-> 3. **硬件本质不匹配**：`sp` 本质上只是一个 **32 位的内存地址数字**。使用裸指针（Raw Pointer）可以告诉编译器：“这块地址由我自行通过汇编来管理，不需要你进行所有权分析”。
->
-> **结论**：在处理跨越软件与硬件边界的“锚点”数据时，裸指针是唯一的选择。安全由程序员通过 `unsafe` 确保。
-
-# 为什么任务栈不放在 TCB 里
-
-你可能会想把栈缓冲区直接放进 TCB，省去额外的全局数组：
-
-```rust
-// 看起来很直观，但有问题
-pub struct Task {
-    pub stack_ptr: *mut u32,
-    stack: [u32; 512],  // ← 和 stack_ptr 共存在同一个 struct 里
-}
-```
-
-问题在于：`stack_ptr` 是一个指向 `stack` 数组内部某个槽的指针。一旦 `Task` 结构体被移动（赋值给另一个变量、放入数组、传给函数），`stack` 数组的地址就变了，但 `stack_ptr` 还指着旧地址——变成了**悬挂指针（dangling pointer）**，访问它会崩溃或产生随机错误。
-
-这在 Rust 中叫做 **自引用结构（self-referential struct）** 问题，编译器会拒绝让你创建这样的结构（通过移动）。
-
-**解决方案：把任务栈放在独立的全局静态数组里。** `static mut` 的地址在程序运行期间永远不会改变，`stack_ptr` 指向它里面永远有效。
-
-```rust
-pub const STACK_SIZE: usize = 512; // 2KB（512 × 4 字节）
-pub const MAX_TASKS: usize = 4;
-
-static mut TASK_STACKS: [[u32; STACK_SIZE]; MAX_TASKS] = [[0; STACK_SIZE]; MAX_TASKS];
-static mut TASK_COUNT: usize = 0;
-```
-
 # 初始化任务栈：伪造第一次"现场"
 
 这是整个 context switch 实现里最容易出错的部分，需要仔细理解。
 
 ## 问题：新任务从未运行过
 
-下一章（`02-context-save-restore.md`）的恢复代码会做这件事：
+下一章《上下文保存与恢复实现》的恢复代码会做这件事：
 
 ```asm
 ldr  sp, [r1]           // 从 TCB 里取出任务的 stack_ptr，切换 sp
@@ -137,16 +101,7 @@ bx   lr                 // 跳到 lr 保存的地址继续执行
 低地址
   sp  → [r0  = 0      ]
         [r1  = 0      ]
-        [r2  = 0      ]
-        [r3  = 0      ]
-        [r4  = 0      ]
-        [r5  = 0      ]
-        [r6  = 0      ]
-        [r7  = 0      ]
-        [r8  = 0      ]
-        [r9  = 0      ]
-        [r10 = 0      ]
-        [r11 = 0      ]
+        ...
         [r12 = 0      ]
         [lr  = entry  ]  ← 入口函数地址
 高地址
@@ -154,18 +109,26 @@ bx   lr                 // 跳到 lr 保存的地址继续执行
 
 共 14 个槽（14 × 4 = 56 字节）。**sp 指向帧的最低地址（r0 的位置）。**
 
+ARM 栈向低地址增长：`push` 把 sp 减 4 再写数据，`pop` 读数据再把 sp 加 4。
+
+- **栈底**（高地址端，index 511）：sp 的出发点，固定不动
+- **栈顶**（低地址方向）：sp 当前所在位置，push 后往低地址移动
+
+`pop {r0-r12, lr}` 执行完后，sp 会从帧起点**向高地址移动 56 字节**，任务从这个新 sp 开始运行，之后的函数调用都往低地址方向压栈。
+
 用数组索引表示（`STACK_SIZE = 512`）：
 
 ```text
-TASK_STACKS[id][  0 ]  ← 低地址（栈底，永远不会用到）
-TASK_STACKS[id][498]  ← r0 的位置（sp 保存在 TCB 里的值）
-TASK_STACKS[id][499]  ← r1
+下标   内容
+ 0     ← 低地址，栈底（溢出警戒线）
+...   ← pop 后 sp 从 512 往这里走，是任务运行时的活动空间
+498    ← r0 = 0       （帧起点，sp 初始值 = &array[498]）
+499    ← r1 = 0
 ...
-TASK_STACKS[id][510]  ← r12
-TASK_STACKS[id][511]  ← lr = 任务入口函数地址（STACK_SIZE - 1）
+510    ← r12 = 0
+511    ← lr = 入口函数地址
+[512]  ← pop 后 sp 落在这里（数组末尾之上，任务从此开始向下压栈）
 ```
-
-`sp` 保存的值 = `&TASK_STACKS[id][STACK_SIZE - 14]`（帧的最低地址）。
 
 ## 实现 create_task
 
@@ -202,7 +165,7 @@ pub fn create_task(entry: fn() -> !) -> Task {
 
 ```rust
 pub const STACK_SIZE: usize = 512; // 2KB（512 × 4 字节）每个任务
-pub const MAX_TASKS: usize = 4;
+pub const MAX_TASKS: usize = 8;
 
 #[repr(C)]
 pub struct Task {
@@ -213,9 +176,12 @@ pub struct Task {
 static mut TASK_STACKS: [[u32; STACK_SIZE]; MAX_TASKS] = [[0; STACK_SIZE]; MAX_TASKS];
 static mut TASK_COUNT: usize = 0;
 
-/// 创建一个新任务，返回初始化好的 TCB
-pub fn create_task(entry: fn() -> !) -> Task {
+/// 创建一个新任务，返回初始化好的 TCB；任务数超过 MAX_TASKS 时返回 None
+pub fn create_task(entry: fn() -> !) -> Option<Task> {
     unsafe {
+        if TASK_COUNT >= MAX_TASKS {
+            return None;
+        }
         let id = TASK_COUNT;
         TASK_COUNT += 1;
 
@@ -223,14 +189,16 @@ pub fn create_task(entry: fn() -> !) -> Task {
         // lr = 入口函数地址；r0-r12 已为 0
         stack[STACK_SIZE - 1] = entry as u32;
 
-        Task {
+        Some(Task {
             stack_ptr: &mut stack[STACK_SIZE - 14] as *mut u32,
-        }
+        })
     }
 }
 ```
 
 目前 `Task` 没有实现 `Send`（因为包含裸指针）。单核裸机不涉及线程，这不是问题。
+
+> 这里增加了判断 `TASK_COUNT >= MAX_TASKS`，如果超过最大任务数就返回 `None`。在实际应用中，应该在创建任务前检查返回值，避免溢出。
 
 # 验证方法
 
@@ -253,15 +221,6 @@ Q: 为什么多个任务不能共享同一个调用栈？
 - 因为 ARM 硬件只支持一个 sp 寄存器
 - 因为共享栈会导致栈溢出
 E: 栈只是一段连续内存。任务 B 运行时的 push/pop 会覆盖任务 A 留在栈上的数据（局部变量、返回地址）。切回 A 时 sp 指向错误的位置，读到的都是 B 写进去的垃圾值，必然崩溃。
-```
-
-```quiz single
-Q: 为什么不把栈缓冲区 [u32; STACK_SIZE] 直接放在 TCB struct 里面？
-- 因为数组太大，放在 struct 里会编译失败
-- 因为 Rust 不允许 struct 包含数组字段
-+ 因为 stack_ptr 指向 stack 数组内部，一旦 struct 被移动，stack 的地址改变，stack_ptr 就变成悬挂指针
-- 因为 static mut 数组比 struct 字段访问更快
-E: 这是 Rust 中著名的"自引用结构"问题：struct 内部有一个字段的指针指向另一个字段。struct 被赋值或传递时会被复制到新地址，但指针还指着旧地址，成为悬挂指针。把栈放在 static mut 全局数组里，地址永远不变，避免了这个问题。
 ```
 
 ```quiz single

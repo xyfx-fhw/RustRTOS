@@ -6,6 +6,7 @@ mod gic;
 mod timer;
 mod tick;
 mod task;
+mod scheduler;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -62,11 +63,27 @@ global_asm!(r#"
     pop {{r0-r12, lr}}
     subs pc, lr, #4
 
-    fiq_handler:
-    push {{r0-r12, lr}}
-    bl rust_fiq_handler
-    pop {{r0-r12, lr}}
-    subs pc, lr, #4
+// ── fiq_handler：SRSDB + CPS + PUSH，在任务 SVC 栈上直接建 16 字帧 ──────────
+fiq_handler:
+    sub  lr, lr, #4              // ① lr_fiq = 被中断的 PC
+    srsdb sp!, #0x13             // ② {lr_fiq, spsr_fiq} → SVC 栈顶，sp_svc -= 8
+    cps  #0x13                   // ③ 切到 SVC 模式；r8-r12 现在是任务的
+    push {r0-r12, lr}            // ④ 保存 r0-r12 + lr_svc（sp -= 56）
+    // 现在 sp_svc 指向完整 16 字帧底部（r0 处）
+
+    ldr  r0, =CURRENT_TASK       // r0 = &CURRENT_TASK
+    ldr  r0, [r0]                // r0 = CURRENT_TASK（当前任务 Task 指针）
+    str  sp, [r0]                // Task.stack_ptr = sp（保存帧地址到 TCB）
+
+    bl   scheduler_tick          // tick++ + ACK + EOI + 优先级选下一任务 + 更新 CURRENT_TASK
+
+    ldr  r0, =CURRENT_TASK       // 重新读（scheduler_tick 可能已切换）
+    ldr  r0, [r0]
+    ldr  sp, [r0]                // sp = 下一任务的 stack_ptr
+
+    pop  {r0-r12, lr}            // 恢复 r0-r12 + lr_svc
+    rfeia sp!                    // PC=[sp], CPSR=[sp+4], sp+=8，跳入目标任务
+    .ltorg                       // 此处刷新 literal pool，保证偏移正确
 
     // Reset handler
     .section .text.reset_handler, "ax"
@@ -125,21 +142,19 @@ global_asm!(r#"
 static mut TASK_A: task::Task = task::Task { stack_ptr: core::ptr::null_mut() };
 static mut TASK_B: task::Task = task::Task { stack_ptr: core::ptr::null_mut() };
 
-fn task_a_fn() -> ! {
-    let mut count = 0u32;
+fn task_10ms() {   // priority 3，最高
     loop {
-        println!("Task A: {}", count);
-        count += 1;
-        unsafe { task::context_switch(&raw mut TASK_A, &raw const TASK_B); }
+        println!("[10ms p3] <<< PREEMPT >>> tick={}", tick::get_ticks());
+        scheduler::sleep_ticks(10);
     }
 }
 
-fn task_b_fn() -> ! {
-    let mut count = 0u32;
+fn task_20ms() {   // priority 2，用 delay_ticks 忙等模拟长时间工作
     loop {
-        println!("Task B: {}", count);
-        count += 1;
-        unsafe { task::context_switch(&raw mut TASK_B, &raw const TASK_A); }
+        println!("[20ms p2] START tick={}", tick::get_ticks());
+        tick::delay_ticks(15);   // 忙等 15 tick，期间不主动让出 CPU
+        println!("[20ms p2] END   tick={}", tick::get_ticks());
+        scheduler::sleep_ticks(5);
     }
 }
 
@@ -150,11 +165,9 @@ pub extern "C" fn rust_main() -> ! {
     gic::gic_init();
     timer::timer_init();
 
-    unsafe {
-        TASK_A = task::create_task(task_a_fn);
-        TASK_B = task::create_task(task_b_fn);
-        task::start_first_task(&raw const TASK_A);
-    }
+    scheduler::add_task(task_20ms, 2);
+    scheduler::add_task(task_10ms, 3);
+    scheduler::start();
 }
 
 #[unsafe(no_mangle)]

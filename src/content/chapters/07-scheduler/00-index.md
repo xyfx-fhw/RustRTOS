@@ -70,19 +70,100 @@ Task B 运行 → FIQ 触发 → 保存 B 的完整现场 → 调度器选 C →
 **优点**：任务无需主动让出，即使某个任务死循环也不影响其他任务。
 **缺点**：必须正确保存/恢复所有寄存器，包括条件标志（CPSR），稍有出错就会崩溃。
 
-# 16 字 Context Frame 设计
+# 任务切换流程
 
-第 06 章的 14 字 frame（`push {r0-r12, lr}`）用于协作式切换已经够用，但对真抢占**不够**：
+## 整体流程
 
-| 缺失的内容 | 为什么必须保存 |
-| --- | --- |
-| **CPSR 条件标志** | 任务被中断时可能正处于一个 `cmp` 之后还没执行 `beq` 的位置，条件标志丢失会跳到错误地址 |
-| **LR_svc（任务自己的 lr）** | 任务在某个函数调用链中间被中断，lr 里是函数的返回地址，不保存就无法正确返回 |
+在看流程之前，先明确两套 banked 寄存器的关系：
 
-本章统一使用 **16 字 frame（64 字节）**，协作式和抢占式共用同一格式：
+- **任务**运行在 SVC 模式，使用 `sp_svc`（指向 `TASK_STACKS[id]`）和 `lr_svc`
+- **FIQ 中断**触发后切换到 FIQ 模式，CPU 改用 `sp_fiq` 和 `lr_fiq`，以及 FIQ 专属的 `r8-r12_fiq`
+- 两套寄存器是完全独立的物理硬件：FIQ 模式下 `sp_svc` 原封不动保留着任务栈的地址，`lr_svc` 里的函数返回地址也没有被碰
+
+FIQ 定时中断触发时，硬件跳向量表执行 `fiq_handler`，经历三个阶段后跳到下一个任务：
 
 ```text
-sp+0:  r0        ← 低地址
+任务正常运行（SVC 模式）
+  │
+  │  FIQ 中断触发
+  │  硬件自动：lr_fiq ← 被打断的 PC+4
+  │            SPSR_fiq ← 被打断的 CPSR
+  │            切换到 FIQ 模式
+  ▼
+fiq_handler 汇编：保存当前任务现场（FIQ 模式）
+  │  SUB + SRSDB：把 lr_fiq / SPSR_fiq 搬到任务的 SVC 栈，压入栈顶（FIQ 模式）
+  │  CPS：切换到 SVC 模式（中断处理全程在此模式下运行）
+  │  PUSH：把任务的 r0-r12 和 lr_svc 也压进 SVC 栈（SVC 模式）
+  ▼
+rust_fiq_handler（Rust）：执行中断处理
+  │  清 timer 中断标志、tick++
+  │  调度器：选出下一个任务，更新 CURRENT_TASK
+  ▼
+fiq_handler 汇编：恢复下一个任务现场
+  │  POP：恢复下一个任务的 r0-r12 和 lr_svc
+  │  RFEIA：原子恢复 PC 和 CPSR，跳到下一个任务
+  ▼
+下一个任务继续执行
+```
+
+> 正因为 `sp_svc` 在 FIQ 模式下依然有效，SRSDB 才能在 FIQ 模式里直接向任务的 SVC 栈写数据。
+
+## 为什么不能直接沿用第 06 章的做法
+
+第 06 章的协作式切换在 SVC 模式下执行 `push {r0-r12, lr}`，完全没问题。但 FIQ 触发时 CPU 已经切换到了 FIQ 模式，**FIQ 模式有自己私有的 banked 寄存器**：r8-r12 和 lr 在 FIQ 模式下指向 FIQ 专属的物理寄存器，任务原本的 r8-r12 和 lr_svc 被硬件屏蔽。
+
+如果在 FIQ 模式下直接执行同一条 `push {r0-r12, lr}`，保存的是错误的值：
+
+| 寄存器 | 协作式（SVC 模式） | 抢占式（FIQ 模式直接 push） |
+| --- | --- | --- |
+| r0–r7 | 任务的值 ✓ | 任务的值 ✓（这几个不 bank） |
+| r8–r12 | 任务的值 ✓ | **FIQ 自己的 banked 值 ✗** |
+| lr | lr_svc（任务函数返回地址）✓ | **lr_fiq（FIQ 的中断返回地址）✗** |
+
+除了 banking 问题，还有两项是 14 字 frame 根本没有的：
+
+| 缺失 | 为什么必须保存 |
+| --- | --- |
+| **resume_pc** | 协作式里任务主动调用 `context_switch()`，ARM ABI 把返回地址放进了 lr，所以 lr_svc 本身就等于 resume_pc，一个槽够用。抢占式里任务在任意位置被强制打断，lr_svc 里存的是某个函数调用链的返回地址，被打断的真实 PC 在 lr_fiq 里，两者完全不同——必须单独记录 |
+| **CPSR** | 任务可能正处于 `cmp` 之后、`beq` 之前，条件标志丢失会跳到错误地址 |
+
+## 具体实现：SRSDB + CPS + PUSH
+
+FIQ 模式的价值只有一点：`lr_fiq` 和 `SPSR_fiq` 这两个只有 FIQ 模式才能访问的寄存器，分别存着被打断的 PC 和被打断的 CPSR。只要把这两个值提取出来，FIQ 模式就完成了使命——立刻切回 SVC 模式，剩下的全部在 SVC 下完成。
+
+```asm
+; ── 阶段一：FIQ 模式（极短，只做一件事：提取 FIQ 独有信息）──────
+SUB   lr, lr, #4        ; 硬件存入 lr_fiq 的是 PC+4，减 4 还原被打断的真实地址
+SRSDB SP!, #0x13        ; 跨模式写栈：把 {lr_fiq, SPSR_fiq} 压入 SVC 模式的栈
+                        ;   #0x13 = SVC 模式编号（ARM CPSR 低 5 位的模式字段）
+                        ;   SP! 表示更新 sp_svc，不是 sp_fiq
+                        ;   执行后 SVC 栈顶多了 [resume_pc, cpsr] 两个槽
+
+; ── 阶段二：切换回 SVC 模式 ───────────────────────────────────────
+CPS   #0x13             ; 切换处理器模式到 SVC
+                        ; FIQ 的 banked r8-r12 和 lr_fiq 被收起，
+                        ; r8-r12 恢复为任务的真实值，lr 恢复为 lr_svc
+
+; ── 阶段三：SVC 模式下保存剩余寄存器，执行中断处理，恢复现场 ──────
+PUSH  {r0-r12, lr}      ; 保存任务的 r0-r12 和 lr_svc（现在都是正确的值）
+
+BL    rust_fiq_handler  ; 清 timer、tick++、调度器
+                        ; 全程在 SVC 模式、任务私有栈上运行，可以自由调用 Rust 函数
+
+POP   {r0-r12, lr}      ; 恢复下一个任务的 r0-r12 和 lr_svc
+RFEIA SP!               ; 从栈上原子加载 PC 和 CPSR，跳到下一个任务
+                        ; 普通 pop 无法写入 CPSR，必须用异常返回专用指令
+```
+
+## 16 字 Context Frame 布局
+
+三个阶段执行完后，SVC 栈上形成一个完整的 16 字 frame（64 字节）：
+
+- **SRSDB** 先压了 resume_pc + cpsr（高地址，8 字节）
+- **PUSH** 后压了 r0-r12 + lr_svc（低地址，56 字节）
+
+```text
+sp+0:  r0        ← 低地址，sp 指向这里
 sp+4:  r1
 sp+8:  r2
 sp+12: r3
@@ -95,21 +176,14 @@ sp+36: r9
 sp+40: r10
 sp+44: r11
 sp+48: r12
-sp+52: lr_svc    ← 任务的 lr 寄存器（函数返回地址）
-sp+56: resume_pc ← 任务恢复执行的 PC（协作式 = 函数返回地址，抢占式 = 被中断的 PC）
-sp+60: cpsr      ← 任务的 CPSR（含条件标志）
+sp+52: lr_svc    ← 任务函数调用链的返回地址（SVC 模式的 lr）
+sp+56: resume_pc ← 被打断的 PC（来自 lr_fiq - 4，由 SRSDB 存入）
+sp+60: cpsr      ← 被打断时的 CPSR（来自 SPSR_fiq，由 SRSDB 存入）
 ```
 
-恢复路径对两种情况完全相同：
+协作式和抢占式共用这个格式（协作式的 context_switch 也会在 02 节改为构建同样布局的帧）。统一格式带来的好处是：恢复任何任务的代码永远只有一种写法——POP + RFEIA，调度器不需要区分任务是怎么被暂停的。
 
-```asm
-pop  {r0-r12, lr}   ; 恢复 r0-r12 和 lr_svc
-add  sp, sp, #4     ; 跳过 lr_svc 的 4 字节... 不对，见下
-```
-
-实际用 ARM 专用指令优雅处理，详见 02 节。
-
-# SRSDB 与 RFEIA：ARM 的 OS 利器
+## SRSDB 与 RFEIA：ARM 的 OS 利器
 
 这两条指令是 ARM 架构专门为操作系统上下文保存设计的：
 
@@ -165,29 +239,6 @@ RFEIA SP!    ; PC = [sp], CPSR = [sp+4], sp += 8，跳到 PC，同时恢复 CPSR
 | --- | --- |
 | `01-ready-queue.md` | 优先级就绪队列、`sleep_ticks`、空闲任务、完整 scheduler_tick |
 | `02-preemption.md` | SRSDB/RFEIA 实现、16 字 context frame、`add_task(entry, priority)` |
-
-# 验证方法
-
-完成 01 和 02 小节后，运行：
-
-```bash
-cargo build
-qemu-system-arm \
-  -machine mps3-an536 \
-  -nographic \
-  -device loader,file=target/armv8r-none-eabihf/debug/rtos
-```
-
-预期输出（三个任务被 FIQ 抢占，轮流运行）：
-
-```text
-Hello from RTOS!
-[Task 0] count=0
-[Task 1] count=0
-[Task 2] count=0
-[Task 0] count=1
-[Task 1] count=1
-```
 
 # 练习题
 
